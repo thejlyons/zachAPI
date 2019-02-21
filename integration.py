@@ -9,7 +9,6 @@ load_dotenv()
 
 if __name__ == '__main__':
     # TODO: Loops from Heroku DB
-    # TODO: Create files/ and images/ if they don't exist
     print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
     files = 'files'

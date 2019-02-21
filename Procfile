@@ -1,1 +1,1 @@
-dev: python integration.py
+worker: python integration.py

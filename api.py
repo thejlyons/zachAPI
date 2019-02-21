@@ -182,7 +182,7 @@ class API:
                                               & ~self._inventory['Mill Name'].str.contains('Drop Ship',
                                                                                            flags=re.IGNORECASE,
                                                                                            regex=True)]
-        if os.environ['SKIP_EXISTING']:
+        if os.environ['SKIP_EXISTING'] == "True":
             self._inventory = self._inventory.loc[~self._inventory['Item Number'].isin(inventory_store.keys())]
         if os.environ['ONLY_THESE']:
             these = os.environ['ONLY_THESE'].split(",")
