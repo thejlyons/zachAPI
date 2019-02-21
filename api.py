@@ -1,11 +1,15 @@
 """API Class for product and inventory management."""
 import os
+import re
 import pymongo
 import shopify
 from ftplib import FTP_TLS
 import urllib.request
+from urllib.error import HTTPError
+from pyactiveresource.connection import ResourceNotFound, ServerError
 import pandas as pd
 from datetime import datetime
+from time import sleep
 
 
 class API:
@@ -61,11 +65,12 @@ class API:
     _color_groups = ["", "Basic Colors", "Traditional Colors", "Extended Colors", "Extended Colors 2",
                      "Extended Colors 3", "Extended Colors 4", "Extended Colors 5", "Extended Colors 6",
                      "Extended Colors 7", "Extended Colors 8", "Extended Colors 9", "Extended Colors 10"]
-    _image_url = "https://www.alphabroder.com/images/alp/prodDetail/{}".format
+    _image_url = "https://www.alphabroder.com/media/hires/{}".format
     _product_file = 'AllDBInfoALP_Prod.txt'
     _price_file = 'AllDBInfoALP_PRC_R034.txt'
     _inventory_file = 'inventory-v8-alp.txt'
-    _categories = ['Polos', 'Outerwear', 'Fleece', 'Sweatshirts', 'Woven Shirts', 'T-Shirts', 'Infants | Toddlers']
+    _categories = ['T-Shirts']
+    # _categories = ['Polos', 'Outerwear', 'Fleece', 'Sweatshirts', 'Woven Shirts', 'T-Shirts', 'Infants | Toddlers']
 
     def __init__(self, download=True, debug=False):
         """Initialize inventory by parsing provided inventory CSV file and building a dict of all inventory items."""
@@ -73,7 +78,9 @@ class API:
         self._download = download
         self._debug = debug
         self._current_products = {}
-        self._current_variants = {}
+        self._product_images = {}
+        self._styles_to_fix = []
+        self._categories = os.environ['CATEGORIES'].split(",")
 
     def update_inventory(self):
         """Update all product inventory values."""
@@ -108,12 +115,19 @@ class API:
             row = df.loc[df['Item Number'] == item_number]
             if not row.empty:
                 if item["product_id"] not in self._current_products:
-                    self._current_products[item["product_id"]] = shopify.Product.find(item["product_id"])
+                    try:
+                        sleep(0.5)
+                        self._current_products[item["product_id"]] = shopify.Product.find(item["product_id"])
+                    except HTTPError as e:
+                        pass
+                    except ResourceNotFound as e:
+                        pass
 
-                for x in range(len(self._current_products[item["product_id"]].variants)):
-                    if item["variant_id"] == self._current_products[item["product_id"]].variants[x].id:
-                        self._current_products[item["product_id"]].variants[x].inventory_quantity = int(
-                            row["Total Inventory"].values[0])
+                if item["product_id"] in self._current_products:
+                    for x in range(len(self._current_products[item["product_id"]].variants)):
+                        if item["variant_id"] == self._current_products[item["product_id"]].variants[x].id:
+                            self._current_products[item["product_id"]].variants[x].inventory_quantity = int(
+                                row["Total Inventory"].values[0])
 
             p = int(100 * i / total)
             if p % 5 == 0 and p not in progress:
@@ -124,6 +138,7 @@ class API:
         total = len(self._current_products.keys())
         progress = []
         for i, (pid, product) in enumerate(self._current_products.items()):
+            sleep(0.5)
             product.save()
 
             p = int(100 * i / total)
@@ -151,34 +166,59 @@ class API:
 
         if not self._db:
             self._db = self.init_mongodb()
+
         inventory_store = self._db.inventory.find()
         try:
             inventory_store = [item for item in inventory_store][0]
         except IndexError:
             inventory_store = []
-        inventory_store = [key for key in inventory_store if key != '_id']
+        inventory_store = {key: inventory_store[key] for key in inventory_store if key != '_id'}
 
         # Parse Product File
         self.debug("Parsing Product File")
 
         self._inventory = pd.read_csv(os.path.join('files', self._product_file), delimiter='^', engine='python')
         self._inventory = self._inventory.loc[self._inventory['Category'].isin(self._categories)
-                                              & ~self._inventory['Item Number'].isin(inventory_store)]
-        #                                     & (self._inventory['Style'] == 'TT11YL')]
+                                              & ~self._inventory['Mill Name'].str.contains('Drop Ship',
+                                                                                           flags=re.IGNORECASE,
+                                                                                           regex=True)]
+        if os.environ['SKIP_EXISTING']:
+            self._inventory = self._inventory.loc[~self._inventory['Item Number'].isin(inventory_store.keys())]
+        if os.environ['ONLY_THESE']:
+            these = os.environ['ONLY_THESE'].split(",")
+            self._inventory = self._inventory.loc[self._inventory['Style'].isin(these)]
         self._inventory = self._inventory.replace({"Mill Name": {'Bella + Canvas': 'Bella+Canvas'}})
 
         self._inventory.sort_values('Style')
 
+        self.debug(self._inventory.shape[0])
         if limit:
-            self._inventory = self._inventory.head(5000)
+            self._inventory = self._inventory.head(10000)
 
         self.debug("Processing products.")
         total = self._inventory.shape[0]
+        self.debug(total)
         progress = []
         for i, (index, item) in enumerate(self._inventory.iterrows()):
+            if 'Drop Ship' in item["Mill Name"]:
+                continue
             if item["Style"] not in self._current_products:
-                products = shopify.Product.find(limit=250, vendor=item["Mill Name"])
-                products = [p for p in products if item["Style"] in p.title]
+                sleep(0.5)
+                all_products = shopify.Product.find(limit=250, vendor=item["Mill Name"])
+                products = []
+                for product in all_products:
+                    if item["Style"] in product.title:
+                        style = product.title.split(':')
+                        style = style[0].split(" ")[-1]
+                        if item["Style"] == style:
+                            if len(product.options) > 0 and product.options[0].name == 'Color':
+                                print("----{} needs fixed.----".format(item["Style"]))
+                                self._styles_to_fix.append(item["Style"])
+                                sleep(0.5)
+                                product = shopify.Product.find(product.id)
+                            if len(product.variants) == 1 and product.variants[0].title == 'Default Title':
+                                product.variants = []
+                            products.append(product)
                 self._current_products[item["Style"]] = products
             of_color = self._inventory.loc[(self._inventory["Style"] == item["Style"])
                                            & (self._inventory["Color Name"] == item["Color Name"])].shape[0]
@@ -193,16 +233,20 @@ class API:
         self.save_new_products()
 
         self.debug("Updating Database.")
+        for key, item in inventory_store.items():
+            self._shopify_ids[key] = item
         self._db.inventory.delete_many({})
         self._db.inventory.insert_one(self._shopify_ids)
         self._clean()
+
+        print(", ".join(self._styles_to_fix))
 
     def process_item(self, item, of_color):
         """Check if item already exists. If not, create a new variant and add it."""
 
         """Update item in the Shopify store."""
         skip = False
-        product = self._current_products[item["Style"]][-1] if len(self._current_products[item["Style"]]) > 0 else None
+
         similar_variants = 0
         for p in self._current_products[item["Style"]]:
             color_option = ""
@@ -217,7 +261,6 @@ class API:
                     size_option = 'option{}'.format(option.position)
 
             if color_option and size_option:
-                product = p
                 variant = None
                 for v in p.variants:
                     if v.attributes[color_option].lower() == color \
@@ -226,11 +269,16 @@ class API:
                 if variant:
                     self._shopify_ids[item["Item Number"]] = {
                         "variant_id": variant.id,
-                        "product_id": product.id
+                        "product_id": p.id
                     }
                     skip = True
                     break
 
+        product = None
+        for p in self._current_products[item["Style"]]:
+            if len(p.variants) + of_color - similar_variants < 100:
+                product = p
+                break
         if not skip:
             if not product:
                 product = self.new_product(item["Mill Name"], item["Style"], item["Short Description"],
@@ -248,10 +296,8 @@ class API:
             # If total variants, plus the all of that color, mines the ones already made with the same color >= 100
             # then a new product needs created. Shopify limits 100 variants / product.
             color = item["Color Name"].lower()
-            similar_variants = len([v for v in product.variants if v.attributes[color_option].lower() == color])
+            similar_variants = len([v for v in product.variants if str(v.attributes[color_option]).lower() == color])
             if len(product.variants) + of_color - similar_variants >= 100:
-                # product.options = [{"name": "Color", "values": [v[color_option] for v in product.variants]},
-                #                    {"name": "Size", "values": [v[size_option] for v in product.variants]}]
                 for x in range(len(self._current_products[item["Style"]])):
                     if product.id == self._current_products[item["Style"]][x].id:
                         self._current_products[item["Style"]][x] = product
@@ -262,24 +308,22 @@ class API:
                 product = self.new_product(item["Mill Name"], item["Style"], item["Short Description"],
                                            item["Category"], len(self._current_products[item["Style"]]))
 
-            filename = item["Front of Image Name"]
-            image = self.find_image(filename, product.id)
-            image_id = None
-            if image:
-                product.images.append(image)
-                image_id = image.id
-
             if self._prices is None:
                 self._prices = pd.read_csv(os.path.join('files', self._price_file), delimiter='^', engine='python')
 
             price = self._prices.loc[self._prices["Item Number "] == item["Item Number"]]
             if not price.empty:
                 price = price["Piece"].values[0]
+                try:
+                    int(price)
+                except ValueError:
+                    price = 0
             else:
                 price = 0
             variant = shopify.Variant({color_option: item["Color Name"].title(), size_option: item["Size"],
-                                       'price': price, 'image_id': image_id, 'product_id': product.id})
-            self._current_variants.setdefault(item["Style"], []).append(variant)
+                                       'product_id': product.id})
+            if price != 0 and price != "":
+                variant.price = price
             product.variants.append(variant)
 
             found = False
@@ -293,20 +337,19 @@ class API:
 
     def save_new_products(self):
         """Loop through self._current_products and save the last in each list"""
-        total = len(self._current_products.keys())
+        total = 0
+        for k, products in self._current_products.items():
+            total += sum([len(p.variants) for p in products])
+        i = 0
         progress = []
-        for i, (key, products) in enumerate(self._current_products.items()):
-            p = int(100 * i / total)
-            if p not in progress:
-                self.debug("{}%".format(p))
-                progress.append(p)
-
+        for key, products in self._current_products.items():
             main_product = ""
+            if len(products) > 4:
+                print("----Check {}----".format(key))
             for product in products:
-                metafields = product.metafields()
-                for mf in metafields:
-                    if mf.namespace == "api_integration" and mf.key == "main_product":
-                        main_product = mf.value
+                if product.body_html:
+                    main_product = product.handle
+                    break
             if not main_product:
                 main_product = products[0].handle
             other_products = [product.handle for product in products if product.handle != main_product]
@@ -335,6 +378,7 @@ class API:
                         elif mf.key == 'other_product':
                             op = True
                             mf.value = other_products
+                        sleep(0.5)
                         mf.save()
 
                 if not mp:
@@ -352,25 +396,62 @@ class API:
                         'namespace': 'api_integration'
                     }))
 
-                product.save()
+                try:
+                    sleep(0.5)
+                    product.save()
+                except HTTPError:
+                    pass
+                except ServerError:
+                    try:
+                        sleep(60)
+                        product.save()
+                    except HTTPError:
+                        print("----Could not save product({})----".format(product.id))
+                        continue
+                    except ServerError:
+                        print("----Could not save product({})----".format(product.id))
+                        continue
 
-                if key in self._current_variants:
-                    for v1 in product.variants:
-                        for v2 in self._current_variants[key]:
-                            if v1.attributes[color_option].lower() == v2.attributes[color_option].lower() \
-                                    and v1.attributes[size_option].lower() == v2.attributes[size_option].lower():
-                                v1.image_id = v2.image_id
-                                v1.save()
-                                row = self._inventory.loc[
-                                    (self._inventory["Style"] == key)
-                                    & (self._inventory["Color Name"] == v1.attributes[color_option].upper())
-                                    & (self._inventory["Size"] == v1.attributes[size_option])
-                                ]
-                                if not row.empty:
-                                    self._shopify_ids[row["Item Number"].values[0]] = {
-                                        "variant_id": v1.id,
-                                        "product_id": product.id
-                                    }
+                for variant in product.variants:
+                    row = self._inventory.loc[
+                        (self._inventory["Style"] == key)
+                        & (self._inventory["Color Name"] == str(variant.attributes[color_option]).upper())
+                        & (self._inventory["Size"] == variant.attributes[size_option])
+                    ]
+                    if not row.empty and row["Item Number"].values[0] not in self._shopify_ids:
+                        filename = row["Front of Image Name"].values[0]
+                        image = self.find_image(filename, product.id)
+                        if image:
+                            variant.image_id = image.id
+                            try:
+                                sleep(0.5)
+                                variant.save()
+                            except HTTPError:
+                                pass
+                            except ServerError:
+                                try:
+                                    sleep(60)
+                                    variant.save()
+                                except HTTPError:
+                                    print("----Could not save variant({}) from product({})----".format(variant.id,
+                                                                                                       product.id))
+                                    continue
+                                except ServerError:
+                                    print("----Could not save variant({}) from product({})----".format(variant.id,
+                                                                                                       product.id))
+                                    continue
+                        self._shopify_ids[row["Item Number"].values[0]] = {
+                            "variant_id": variant.id,
+                            "product_id": product.id
+                        }
+
+                    p = int(100 * i / total)
+                    if p not in progress:
+                        self.debug("{}%".format(p))
+                        progress.append(p)
+                    i += 1
+                    if i % 1000 == 0:
+                        sleep(60 * 5)
         self.debug("100%\n")
 
     def new_product(self, mill_name, style, short_description, category, color_index):
@@ -378,10 +459,16 @@ class API:
         new_product = shopify.Product()
         title = "{} {}: {}".format(mill_name, style, short_description)
         if color_index > 0:
-            title = "{}, {}".format(title, self._color_groups[color_index])
+            color = ""
+            if color_index >= len(self._color_groups):
+                color = "Extended Colors {}".format(color_index)
+            else:
+                color = self._color_groups[color_index]
+            title = "{}, {}".format(title, color)
         new_product.title = title
         new_product.vendor = mill_name
         new_product.product_type = category
+        sleep(0.5)
         new_product.save()
         new_product.variants = []
         return new_product
@@ -407,28 +494,38 @@ class API:
 
     def find_image(self, filename, product_id):
         """Check if image in self._images otherwise download and create it."""
+        if not product_id:
+            print("No product!")
         if filename in self._images and self._images[filename].product_id == product_id:
             return self._images[filename]
         else:
             if isinstance(filename, str):
-                url = self._image_url(filename)
+                hires = filename.split(".")
+                hires[-2] = ''.join([hires[-2][:-1], 'z'])
+                hires = ".".join(hires)
+                url = self._image_url(hires)
                 # print(url)
 
-                file_location = os.path.join('images', filename)
+                file_location = os.path.join('images', hires)
 
                 opener = urllib.request.build_opener()
                 opener.addheaders = [('User-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                                                     '(KHTML, like Gecko) Chrome/71.0.3578.98 Safari/537.36')]
                 urllib.request.install_opener(opener)
-                urllib.request.urlretrieve(url, file_location)
 
-                image = shopify.Image({"product_id": product_id})
+                try:
+                    urllib.request.urlretrieve(url, file_location)
+                    image = shopify.Image({"product_id": product_id})
+                except HTTPError:
+                    image = None
 
-                with open(file_location, 'rb') as f:
-                    encoded = f.read()
-                    image.attach_image(encoded, file_location)
-                    image.save()
-                self._images[filename] = image
+                if image:
+                    with open(file_location, 'rb') as f:
+                        encoded = f.read()
+                        image.attach_image(encoded, file_location)
+                        sleep(0.5)
+                        image.save()
+                    self._images[filename] = image
                 return image
             else:
                 return None

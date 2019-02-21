@@ -1,4 +1,5 @@
 """API integration for syncing inventories from AlphaBroder to Shopify."""
+import os
 from api import API
 from dotenv import load_dotenv
 from datetime import datetime
@@ -10,7 +11,18 @@ if __name__ == '__main__':
     # TODO: Loops from Heroku DB
     # TODO: Create files/ and images/ if they don't exist
     print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+    files = 'files'
+    if not os.path.exists(files):
+        os.mkdir(files)
+
+    images = 'images'
+    if not os.path.exists(images):
+        os.mkdir(images)
+
     api = API(True, True)
-    api.update_products()
-    api.update_inventory()
+    if os.environ["UPDATE"] == "products":
+        api.update_products()
+    else:
+        api.update_inventory()
     print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
