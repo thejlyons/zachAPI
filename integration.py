@@ -19,9 +19,9 @@ if __name__ == '__main__':
     if not os.path.exists(images):
         os.mkdir(images)
 
-    api = API(True, True)
+    api = API(False, True)
     if os.environ["UPDATE"] == "products":
-        api.update_products()
+        api.update_products(True)
     else:
         api.update_inventory()
     print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))

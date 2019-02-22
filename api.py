@@ -10,7 +10,7 @@ from pyactiveresource.connection import ResourceNotFound, ServerError
 import pandas as pd
 from datetime import datetime
 from time import sleep
-from multiprocessing import Process, Queue, Lock
+from multiprocessing import Process, Array, Lock
 import shopify_limits
 
 
@@ -72,7 +72,7 @@ class API:
     _product_file = 'AllDBInfoALP_Prod.txt'
     _price_file = 'AllDBInfoALP_PRC_R034.txt'
     _inventory_file = 'inventory-v8-alp.txt'
-    _categories = ['T-Shirts']
+    _progress = []
     # _categories = ['Polos', 'Outerwear', 'Fleece', 'Sweatshirts', 'Woven Shirts', 'T-Shirts', 'Infants | Toddlers']
 
     def __init__(self, download=True, debug=False):
@@ -213,7 +213,7 @@ class API:
 
         self.debug(self._inventory.shape[0])
         if limit:
-            self._inventory = self._inventory.head(10000)
+            self._inventory = self._inventory.head(250)
 
         self.debug("Processing products.")
         total = self._inventory.shape[0]
@@ -223,7 +223,6 @@ class API:
             if 'Drop Ship' in item["Mill Name"]:
                 continue
             if item["Style"] not in self._current_products:
-                sleep(0.5)
                 all_products = shopify.Product.find(limit=250, vendor=item["Mill Name"])
                 products = []
                 for product in all_products:
@@ -234,7 +233,6 @@ class API:
                             if len(product.options) > 0 and product.options[0].name == 'Color':
                                 print("----{} needs fixed.----".format(item["Style"]))
                                 self._styles_to_fix.append(item["Style"])
-                                sleep(0.5)
                                 product = shopify.Product.find(product.id)
                             if len(product.variants) == 1 and product.variants[0].title == 'Default Title':
                                 product.variants = []
@@ -250,7 +248,7 @@ class API:
         self.debug("100%\n")
 
         self.debug("Saving new products.")
-        self.save_new_products()
+        self.start_save_processes()
 
         self.debug("Updating Database.")
         for key, item in inventory_store.items():
@@ -345,6 +343,9 @@ class API:
                 price = 0
             variant = shopify.Variant({color_option: item["Color Name"].title(), size_option: item["Size"],
                                        'product_id': product.id})
+            self._images[item["Front of Image Name"]] = {
+                "product_id": product.id
+            }
             if price != 0 and price != "":
                 variant.price = price
             product.variants.append(variant)
@@ -358,46 +359,41 @@ class API:
             if not found:
                 self._current_products[item["Style"]].append(product)
 
-    # def start_save_processes(self):
-    #     """Create Processes that will save all the changes."""
-    #     queue = Queue()
-    #     lock = Lock()
-    #     processes = []
-    #
-    #     producer = Process(target=add_to_queue, args=(queue, lock))
-    #
-    #     for i in range(15):
-    #         p = Process(target=save_new_products, args=(queue, lock))
-    #
-    #         # This is critical! The consumer function has an infinite loop
-    #         # Which means it will never exit unless we set daemon to true
-    #         consumers.append(p)
-    #
-    #     # Start the producers and consumer
-    #     # The Python VM will launch new independent processes for each Process object
-    #     for p in producers:
-    #         p.start()
-    #
-    #     for c in consumers:
-    #         c.start()
-    #
-    #     # Like threading, we have a join() method that synchronizes our program
-    #     for p in producers:
-    #         p.join()
-    #
-    #     print('Parent process exiting...')
+    def start_save_processes(self):
+        """Create Processes that will save all the changes."""
+        self.debug("Finding images.")
+        # self.find_images()
 
-    def save_new_products(self, queue, lock):
+        self.debug("Starting processes.")
+        processes = []
+        lock = Lock()
+        self._current_products = [(k, i) for k, i in self._current_products.items()]
+        total = len(self._current_products)
+        self._progress = []
+
+        for i in range(15):
+            p = Process(target=self.save_new_products, args=(lock, total,))
+            p.daemon = True
+            p.start()
+            processes.append(p)
+
+        for p in processes:
+            p.join()
+
+    def save_new_products(self, lock, total):
         """Loop through self._current_products and save the last in each list"""
-        total = 0
-        for k, products in self._current_products.items():
-            total += sum([len(p.variants) for p in products])
-        i = 0
-        progress = []
-        for key, products in self._current_products.items():
+        remaining = 0
+        with lock():
+            remaining = len(self._current_products)
+        while remaining:
+            style = ""
+            products = []
+            with lock():
+                style, products = self._current_products.pop()
+
             main_product = ""
             if len(products) > 4:
-                print("----Check {}----".format(key))
+                print("----Check {}----".format(style))
             for product in products:
                 if product.body_html:
                     main_product = product.handle
@@ -430,7 +426,6 @@ class API:
                         elif mf.key == 'other_product':
                             op = True
                             mf.value = other_products
-                        sleep(0.5)
                         mf.save()
 
                 if not mp:
@@ -447,64 +442,35 @@ class API:
                         'value_type': 'string',
                         'namespace': 'api_integration'
                     }))
-
-                try:
-                    sleep(0.5)
-                    product.save()
-                except HTTPError:
-                    pass
-                except ServerError:
-                    try:
-                        sleep(60)
-                        product.save()
-                    except HTTPError:
-                        print("----Could not save product({})----".format(product.id))
-                        continue
-                    except ServerError:
-                        print("----Could not save product({})----".format(product.id))
-                        continue
+                product.save()
 
                 for variant in product.variants:
                     row = self._inventory.loc[
-                        (self._inventory["Style"] == key)
+                        (self._inventory["Style"] == style)
                         & (self._inventory["Color Name"] == str(variant.attributes[color_option]).upper())
                         & (self._inventory["Size"] == variant.attributes[size_option])
                     ]
                     if not row.empty and row["Item Number"].values[0] not in self._shopify_ids:
                         filename = row["Front of Image Name"].values[0]
-                        image = self.find_image(filename, product.id)
+                        image = self._images[filename].get("image", None)
                         if image:
                             variant.image_id = image.id
-                            try:
-                                sleep(0.5)
-                                variant.save()
-                            except HTTPError:
-                                pass
-                            except ServerError:
-                                try:
-                                    sleep(60)
-                                    variant.save()
-                                except HTTPError:
-                                    print("----Could not save variant({}) from product({})----".format(variant.id,
-                                                                                                       product.id))
-                                    continue
-                                except ServerError:
-                                    print("----Could not save variant({}) from product({})----".format(variant.id,
-                                                                                                       product.id))
-                                    continue
-                        self._shopify_ids[row["Item Number"].values[0]] = {
-                            "variant_id": variant.id,
-                            "product_id": product.id
-                        }
-                        self._product_ids.setdefault(str(product.id), {})[str(variant.id)] = row["Item Number"].values[0]
+                            variant.save()
+                        with lock:
+                            self._shopify_ids[row["Item Number"].values[0]] = {
+                                "variant_id": variant.id,
+                                "product_id": product.id
+                            }
+                            self._product_ids.setdefault(str(product.id), {})[str(variant.id)] = row[
+                                "Item Number"].values[0]
 
-                    p = int(100 * i / total)
-                    if p not in progress:
-                        self.debug("{}%".format(p))
-                        progress.append(p)
-                    i += 1
-                    if i % 1000 == 0:
-                        sleep(60 * 5)
+                    with lock():
+                        remaining = len(self._current_products)
+                    p = int(100 * (total - remaining) / total)
+                    with lock():
+                        if p not in self._progress:
+                            self.debug("{}%".format(p))
+                            self._progress.append(p)
         self.debug("100%\n")
 
     def new_product(self, mill_name, style, short_description, category, color_index):
@@ -521,7 +487,6 @@ class API:
         new_product.title = title
         new_product.vendor = mill_name
         new_product.product_type = category
-        sleep(0.5)
         new_product.save()
         new_product.variants = []
         return new_product
@@ -545,19 +510,26 @@ class API:
 
         ftp.quit()
 
+    def find_images(self):
+        """Find all images."""
+        total = len(self._images.keys())
+        progress = []
+        for i, (filename, image_data) in enumerate(self._images.items()):
+            self.find_image(filename, image_data["product_id"])
+            p = int(100 * i / total)
+            if p not in progress:
+                self.debug("{}%".format(p))
+                progress.append(p)
+
     def find_image(self, filename, product_id):
         """Check if image in self._images otherwise download and create it."""
-        if not product_id:
-            print("No product!")
-        if filename in self._images and self._images[filename].product_id == product_id:
-            return self._images[filename]
-        else:
+        image = self._images[filename].get("image", None)
+        if not image or image.product_id != product_id:
             if isinstance(filename, str):
                 hires = filename.split(".")
                 hires[-2] = ''.join([hires[-2][:-1], 'z'])
                 hires = ".".join(hires)
                 url = self._image_url(hires)
-                # print(url)
 
                 file_location = os.path.join('images', hires)
 
@@ -576,12 +548,8 @@ class API:
                     with open(file_location, 'rb') as f:
                         encoded = f.read()
                         image.attach_image(encoded, file_location)
-                        sleep(0.5)
                         image.save()
-                    self._images[filename] = image
-                return image
-            else:
-                return None
+                    self._images[filename]["image"] = image
 
     def _clean(self):
         """Remove all downloaded files."""
