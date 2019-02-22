@@ -11,6 +11,9 @@ import pandas as pd
 from datetime import datetime
 from time import sleep
 
+from threading import Thread
+import shopify_limits
+
 
 class API:
     """
@@ -95,6 +98,17 @@ class API:
                                                                  os.environ["SHOPIFY_STORE"])
         shopify.ShopifyResource.set_site(shop_url)
 
+        all_products = {}
+        i = 0
+        self.debug("Getting page {}".format(i))
+        products = shopify.Product.find(limit=250, page=i)
+        while len(products) > 0:
+            for product in products:
+                all_products[product.id] = product
+            i += 1
+            self.debug("Getting page {}".format(i))
+            products = shopify.Product.find(limit=250, page=i)
+
         if not self._db:
             self._db = self.init_mongodb()
 
@@ -116,11 +130,8 @@ class API:
             if not row.empty:
                 if item["product_id"] not in self._current_products:
                     try:
-                        sleep(0.5)
-                        self._current_products[item["product_id"]] = shopify.Product.find(item["product_id"])
-                    except HTTPError as e:
-                        pass
-                    except ResourceNotFound as e:
+                        self._current_products[item["product_id"]] = all_products[item["product_id"]]
+                    except KeyError:
                         pass
 
                 if item["product_id"] in self._current_products:
@@ -135,6 +146,10 @@ class API:
                 progress.append(p)
         self.debug("100%\n")
 
+        for x, products in enumerate(list(self.chunks([i for k, i in self._current_products.items()],
+                                                      int(len(self._current_products.keys()) / 10)))):
+            t = Thread(target=self.save_thread, args=(x, products,))
+            t.start()
         total = len(self._current_products.keys())
         progress = []
         for i, (pid, product) in enumerate(self._current_products.items()):
@@ -148,6 +163,19 @@ class API:
 
         self.debug("100%\n")
         self._clean()
+
+    @staticmethod
+    def save_thread(thread_number, products):
+        """Thread for saving a list of products."""
+        total = len(products)
+        progress = []
+        for i, product in enumerate(products):
+            product.save()
+            p = int(100 * i / total)
+            if p % 5 == 0 and p not in progress:
+                print("<{}>: Thread {} is {}% finished".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                                               thread_number, p))
+                progress.append(p)
 
     def update_products(self, limit=False):
         """Update all products."""
@@ -571,3 +599,9 @@ class API:
         """Method for printing debug messages."""
         if self._debug:
             print("<{}>: {}".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg))
+
+    @staticmethod
+    def chunks(l, n):
+        """Yield successive n-sized chunks from l."""
+        for i in range(0, len(l), n):
+            yield l[i:i + n]
