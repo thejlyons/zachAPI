@@ -65,6 +65,7 @@ class API:
     _sizes = {}
     _images = {}
     _shopify_ids = {}
+    _product_ids = {}
     _color_groups = ["", "Basic Colors", "Traditional Colors", "Extended Colors", "Extended Colors 2",
                      "Extended Colors 3", "Extended Colors 4", "Extended Colors 5", "Extended Colors 6",
                      "Extended Colors 7", "Extended Colors 8", "Extended Colors 9", "Extended Colors 10"]
@@ -101,44 +102,36 @@ class API:
         if not self._db:
             self._db = self.init_mongodb()
 
-        inventory = self._db.inventory.find()
+        self._product_ids = self._db.products.find()
         try:
-            inventory = [item for item in inventory][0]
+            self._product_ids = [item for item in self._product_ids][0]
         except IndexError:
-            inventory = []
-        inventory = {key: inventory[key] for key in inventory if key != '_id'}
+            self._product_ids = []
+        self._product_ids = {key: self._product_ids[key] for key in self._product_ids if key != '_id'}
 
         # Parse Inventory File
         self.debug("Parsing Inventory File")
         df = pd.read_csv(os.path.join('files', self._inventory_file), delimiter=',', engine='python')
 
-        while len(products) > 0:
-            all_products = {}
+        z = 0
+        while True:
             self._current_products = {}
-            z = 0
-            for _ in range(3):
-                self.debug("Getting page {}".format(z))
-                products = shopify.Product.find(limit=250, page=z)
-                z += 1
-                for product in products:
-                    all_products[product.id] = product
-
-            total = len(inventory.keys())
+            self.debug("Getting page {}".format(z))
+            products = shopify.Product.find(limit=250, page=z)
+            z += 1
+            if not products:
+                break
+            total = len(products)
             progress = []
-            for i, (item_number, item) in enumerate(inventory.items()):
-                row = df.loc[df['Item Number'] == item_number]
-                if not row.empty:
-                    if item["product_id"] not in self._current_products:
-                        try:
-                            self._current_products[item["product_id"]] = all_products[item["product_id"]]
-                        except KeyError:
-                            pass
-
-                    if item["product_id"] in self._current_products:
-                        for x in range(len(self._current_products[item["product_id"]].variants)):
-                            if item["variant_id"] == self._current_products[item["product_id"]].variants[x].id:
-                                self._current_products[item["product_id"]].variants[x].inventory_quantity = int(
-                                    row["Total Inventory"].values[0])
+            for i in range(total):
+                for j in range(len(products[i].variants)):
+                    pid = products[i].id
+                    vid = products[i].variants[j].id
+                    if pid in self._product_ids and vid in self._product_ids[pid]:
+                        item = self._product_ids[pid][vid]
+                        row = df.loc[df['Item Number'] == item]
+                        if not row.empty:
+                            products[i].variants[j].inventory_quantity = int(row["Total Inventory"].values[0])
 
                 p = int(100 * i / total)
                 if p % 5 == 0 and p not in progress:
@@ -146,11 +139,18 @@ class API:
                     progress.append(p)
             self.debug("100%\n")
 
-            for x, ps in enumerate(list(self.chunks([i for k, i in self._current_products.items()],
-                                                    int(len(self._current_products.keys()) / 10)))):
+            threads = []
+            for x, ps in enumerate(list(self.chunks(products, int(len(products) / 10)))):
                 t = Thread(target=self.save_thread, args=(x, ps,))
                 t.start()
+                threads.append(t)
 
+            while threads:
+                for t in threads:
+                    if not t.isAlive():
+                        t.handled = True
+                threads = [t for t in threads if not t.handled]
+                sleep(5)
             # total = len(self._current_products.keys())
             # progress = []
             # for i, (pid, product) in enumerate(self._current_products.items()):
@@ -197,11 +197,17 @@ class API:
             self._db = self.init_mongodb()
 
         inventory_store = self._db.inventory.find()
+        self._product_ids = self._db.products.find()
         try:
             inventory_store = [item for item in inventory_store][0]
         except IndexError:
             inventory_store = []
         inventory_store = {key: inventory_store[key] for key in inventory_store if key != '_id'}
+        try:
+            self._product_ids = [item for item in self._product_ids][0]
+        except IndexError:
+            self._product_ids = []
+        self._product_ids = {key: self._product_ids[key] for key in self._product_ids if key != '_id'}
 
         # Parse Product File
         self.debug("Parsing Product File")
@@ -266,6 +272,8 @@ class API:
             self._shopify_ids[key] = item
         self._db.inventory.delete_many({})
         self._db.inventory.insert_one(self._shopify_ids)
+        self._db.products.delete_many({})
+        self._db.products.insert_one(self._product_ids)
         self._clean()
 
         print(", ".join(self._styles_to_fix))
@@ -300,6 +308,7 @@ class API:
                         "variant_id": variant.id,
                         "product_id": p.id
                     }
+                    self._product_ids.setdefault(str(p.id), {})[str(variant.id)] = item["Item Number"]
                     skip = True
                     break
 
@@ -473,6 +482,7 @@ class API:
                             "variant_id": variant.id,
                             "product_id": product.id
                         }
+                        self._product_ids.setdefault(str(product.id), {})[str(variant.id)] = row["Item Number"].values[0]
 
                     p = int(100 * i / total)
                     if p not in progress:
