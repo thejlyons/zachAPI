@@ -146,10 +146,7 @@ class API:
                 threads.append(t)
 
             while threads:
-                for t in threads:
-                    if not t.isAlive():
-                        t.handled = True
-                threads = [t for t in threads if not t.handled]
+                threads = [t for t in threads if not t.isAlive()]
                 sleep(5)
             # total = len(self._current_products.keys())
             # progress = []
