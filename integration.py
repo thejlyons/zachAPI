@@ -19,7 +19,7 @@ if __name__ == '__main__':
     if not os.path.exists(images):
         os.mkdir(images)
 
-    api = API(False, True)
+    api = API(True, True)
     if os.environ["UPDATE"] == "products":
         api.update_products(True)
     else:

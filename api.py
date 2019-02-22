@@ -10,7 +10,7 @@ from pyactiveresource.connection import ResourceNotFound, ServerError
 import pandas as pd
 from datetime import datetime
 from time import sleep
-from multiprocessing import Process, Array, Lock
+from multiprocessing import Process, Manager, Lock
 import shopify_limits
 
 
@@ -362,60 +362,22 @@ class API:
     def start_save_processes(self):
         """Create Processes that will save all the changes."""
         self.debug("Finding images.")
-        # self.find_images()
+        self.find_images()
 
-        self.debug("Starting processes.")
-        processes = []
-        lock = Lock()
-        self._current_products = [(k, i) for k, i in self._current_products.items()]
-        total = len(self._current_products)
-        self._progress = []
-
-        for i in range(15):
-            p = Process(target=self.save_new_products, args=(lock, total,))
-            p.daemon = True
-            p.start()
-            processes.append(p)
-
-        for p in processes:
-            p.join()
-
-    def save_new_products(self, lock, total):
-        """Loop through self._current_products and save the last in each list"""
-        remaining = 0
-        with lock():
-            remaining = len(self._current_products)
-        while remaining:
-            style = ""
-            products = []
-            with lock():
-                style, products = self._current_products.pop()
-
+        self.debug("Setting metafields.")
+        total = len(self._current_products.keys())
+        progress = []
+        for i, key in enumerate(self._current_products):
             main_product = ""
-            if len(products) > 4:
-                print("----Check {}----".format(style))
-            for product in products:
+            for product in self._current_products[key]:
                 if product.body_html:
                     main_product = product.handle
                     break
             if not main_product:
-                main_product = products[0].handle
-            other_products = [product.handle for product in products if product.handle != main_product]
-            for product in products:
-                color_option = ""
-                size_option = ""
-                try:
-                    color_option = ['option{}'.format(o.position) for o in product.options if o.name.lower() == "color"]
-                    color_option = color_option[0]
-                    size_option = ['option{}'.format(o.position) for o in product.options if o.name.lower() == "size"]
-                    size_option = size_option[0]
-                except IndexError:
-                    size_option = 'option1'
-                    color_option = 'option2'
-                product.options = [{"name": "Size", "values": [v.attributes[size_option] for v in product.variants]},
-                                   {"name": "Color", "values": [v.attributes[color_option] for v in product.variants]}]
-
-                metafields = product.metafields()
+                main_product = self._current_products[key][0].handle
+            other_products = [product.handle for product in self._current_products[key] if product.handle != main_product]
+            for x in range(len(self._current_products[key])):
+                metafields = self._current_products[key][x].metafields()
                 mp = False
                 op = False
                 for mf in metafields:
@@ -429,49 +391,109 @@ class API:
                         mf.save()
 
                 if not mp:
-                    product.add_metafield(shopify.Metafield({
+                    self._current_products[key][x].add_metafield(shopify.Metafield({
                         'key': 'main_product',
                         'value': main_product,
                         'value_type': 'string',
                         'namespace': 'api_integration'
                     }))
                 if not op:
-                    product.add_metafield(shopify.Metafield({
+                    self._current_products[key][x].add_metafield(shopify.Metafield({
                         'key': 'other_products',
                         'value': ",".join(other_products),
                         'value_type': 'string',
                         'namespace': 'api_integration'
                     }))
+            p = int(100 * i / total)
+            if p % 5 == 0 and p not in progress:
+                self.debug("{}%".format(p))
+                progress.append(p)
+
+        self.debug("Starting processes.")
+        processes = []
+        lock = Lock()
+
+        manager = Manager()
+        ns = manager.Namespace()
+        ns.products = [(k, i) for k, i in self._current_products.items()]
+        ns.progress = []
+        ns.shopify_ids = self._shopify_ids
+        ns.product_ids = self._product_ids
+        ns.images = self._images
+        ns.inventory = self._inventory
+        total = len(self._current_products.keys())
+
+        for i in range(15):
+            p = Process(target=self.save_new_products, args=(ns, lock, total,))
+            p.daemon = True
+            p.start()
+            processes.append(p)
+
+        for p in processes:
+            p.join()
+
+        self._shopify_ids = ns.shopify_ids
+        self._product_ids = ns.product_ids
+
+    @staticmethod
+    def save_new_products(ns, lock, total):
+        """Loop through self._current_products and save the last in each list"""
+        import shopify
+
+        shop_url = "https://{}:{}@{}.myshopify.com/admin".format(os.environ["SHOPIFY_API_KEY"],
+                                                                 os.environ["SHOPIFY_PASSWORD"],
+                                                                 os.environ["SHOPIFY_STORE"])
+        shopify.ShopifyResource.set_site(shop_url)
+
+        remaining = len(ns.products)
+        while remaining:
+            style = ""
+            products = []
+            with lock:
+                style, products = ns.products.pop()
+
+            if len(products) > 4:
+                print("----Check {}----".format(style))
+            for product in products:
+                color_option = ""
+                size_option = ""
+                try:
+                    color_option = ['option{}'.format(o.position) for o in product.options if o.name.lower() == "color"]
+                    color_option = color_option[0]
+                    size_option = ['option{}'.format(o.position) for o in product.options if o.name.lower() == "size"]
+                    size_option = size_option[0]
+                except IndexError:
+                    size_option = 'option1'
+                    color_option = 'option2'
+                product.options = [{"name": "Size", "values": [v.attributes[size_option] for v in product.variants]},
+                                   {"name": "Color", "values": [v.attributes[color_option] for v in product.variants]}]
                 product.save()
 
                 for variant in product.variants:
-                    row = self._inventory.loc[
-                        (self._inventory["Style"] == style)
-                        & (self._inventory["Color Name"] == str(variant.attributes[color_option]).upper())
-                        & (self._inventory["Size"] == variant.attributes[size_option])
+                    row = ns.inventory.loc[
+                        (ns.inventory["Style"] == style)
+                        & (ns.inventory["Color Name"] == str(variant.attributes[color_option]).upper())
+                        & (ns.inventory["Size"] == variant.attributes[size_option])
                     ]
-                    if not row.empty and row["Item Number"].values[0] not in self._shopify_ids:
+                    if not row.empty and row["Item Number"].values[0] not in ns.shopify_ids:
                         filename = row["Front of Image Name"].values[0]
-                        image = self._images[filename].get("image", None)
+                        image = ns.images[filename].get("image", None)
                         if image:
                             variant.image_id = image.id
                             variant.save()
                         with lock:
-                            self._shopify_ids[row["Item Number"].values[0]] = {
+                            ns.shopify_ids[row["Item Number"].values[0]] = {
                                 "variant_id": variant.id,
                                 "product_id": product.id
                             }
-                            self._product_ids.setdefault(str(product.id), {})[str(variant.id)] = row[
+                            ns.product_ids.setdefault(str(product.id), {})[str(variant.id)] = row[
                                 "Item Number"].values[0]
 
-                    with lock():
-                        remaining = len(self._current_products)
+                    remaining = len(ns.products)
                     p = int(100 * (total - remaining) / total)
-                    with lock():
-                        if p not in self._progress:
-                            self.debug("{}%".format(p))
-                            self._progress.append(p)
-        self.debug("100%\n")
+                    if p not in ns.progress:
+                        print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), p))
+                        ns.progress.append(p)
 
     def new_product(self, mill_name, style, short_description, category, color_index):
         """Create a new Shopify product with the given data."""
