@@ -10,8 +10,7 @@ from pyactiveresource.connection import ResourceNotFound, ServerError
 import pandas as pd
 from datetime import datetime
 from time import sleep
-
-from threading import Thread
+from multiprocessing import Process, Queue, Lock
 import shopify_limits
 
 
@@ -121,8 +120,7 @@ class API:
             z += 1
             if not products:
                 break
-            total = len(products)
-            progress = []
+
             for i in range(total):
                 for j in range(len(products[i].variants)):
                     pid = products[i].id
@@ -133,34 +131,17 @@ class API:
                         if not row.empty:
                             products[i].variants[j].inventory_quantity = int(row["Total Inventory"].values[0])
 
-            #     p = int(100 * i / total)
-            #     if p % 5 == 0 and p not in progress:
-            #         self.debug("{}%".format(p))
-            #         progress.append(p)
-            # self.debug("100%\n")
-
-            threads = []
+            processes = []
             chunks = list(self.chunks(products, int(len(products) / 10)))
             for ps in chunks:
-                t = Thread(target=self.save_thread, args=(ps, bool(ps == chunks[-1],)))
-                t.start()
-                threads.append(t)
+                p = Process(target=self.save_thread, args=(ps, bool(ps == chunks[-1],)))
+                p.daemon = True
+                p.start()
+                processes.append(p)
 
-            while threads:
-                threads = [t for t in threads if not t.isAlive()]
-                sleep(5)
-            # total = len(self._current_products.keys())
-            # progress = []
-            # for i, (pid, product) in enumerate(self._current_products.items()):
-            #     sleep(0.5)
-            #     product.save()
-            #
-            #     p = int(100 * i / total)
-            #     if p % 5 == 0 and p not in progress:
-            #         self.debug("{}%".format(p))
-            #         progress.append(p)
+            for p in processes:
+                p.join()
 
-        self.debug("100%\n")
         self._clean()
 
     @staticmethod
@@ -169,11 +150,18 @@ class API:
         total = len(products)
         progress = []
         for i, product in enumerate(products):
-            product.save()
+            try:
+                product.save()
+            except HTTPError:
+                pass
+            except ResourceNotFound:
+                pass
             p = int(100 * i / total)
             if is_last and p % 5 == 0 and p not in progress:
                 print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), p))
                 progress.append(p)
+        if is_last:
+            print("<{}>: 100%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
 
     def update_products(self, limit=False):
         """Update all products."""
