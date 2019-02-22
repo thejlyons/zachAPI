@@ -121,7 +121,7 @@ class API:
             if not products:
                 break
 
-            for i in range(total):
+            for i in range(len(products)):
                 for j in range(len(products[i].variants)):
                     pid = products[i].id
                     vid = products[i].variants[j].id
@@ -358,7 +358,36 @@ class API:
             if not found:
                 self._current_products[item["Style"]].append(product)
 
-    def save_new_products(self):
+    # def start_save_processes(self):
+    #     """Create Processes that will save all the changes."""
+    #     queue = Queue()
+    #     lock = Lock()
+    #     processes = []
+    #
+    #     producer = Process(target=add_to_queue, args=(queue, lock))
+    #
+    #     for i in range(15):
+    #         p = Process(target=save_new_products, args=(queue, lock))
+    #
+    #         # This is critical! The consumer function has an infinite loop
+    #         # Which means it will never exit unless we set daemon to true
+    #         consumers.append(p)
+    #
+    #     # Start the producers and consumer
+    #     # The Python VM will launch new independent processes for each Process object
+    #     for p in producers:
+    #         p.start()
+    #
+    #     for c in consumers:
+    #         c.start()
+    #
+    #     # Like threading, we have a join() method that synchronizes our program
+    #     for p in producers:
+    #         p.join()
+    #
+    #     print('Parent process exiting...')
+
+    def save_new_products(self, queue, lock):
         """Loop through self._current_products and save the last in each list"""
         total = 0
         for k, products in self._current_products.items():
