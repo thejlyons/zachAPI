@@ -133,15 +133,16 @@ class API:
                         if not row.empty:
                             products[i].variants[j].inventory_quantity = int(row["Total Inventory"].values[0])
 
-                p = int(100 * i / total)
-                if p % 5 == 0 and p not in progress:
-                    self.debug("{}%".format(p))
-                    progress.append(p)
-            self.debug("100%\n")
+            #     p = int(100 * i / total)
+            #     if p % 5 == 0 and p not in progress:
+            #         self.debug("{}%".format(p))
+            #         progress.append(p)
+            # self.debug("100%\n")
 
             threads = []
-            for x, ps in enumerate(list(self.chunks(products, int(len(products) / 10)))):
-                t = Thread(target=self.save_thread, args=(x, ps,))
+            chunks = list(self.chunks(products, int(len(products) / 10)))
+            for ps in chunks:
+                t = Thread(target=self.save_thread, args=(ps, bool(ps == chunks[-1],)))
                 t.start()
                 threads.append(t)
 
@@ -163,16 +164,15 @@ class API:
         self._clean()
 
     @staticmethod
-    def save_thread(thread_number, products):
+    def save_thread(products, is_last):
         """Thread for saving a list of products."""
         total = len(products)
         progress = []
         for i, product in enumerate(products):
             product.save()
             p = int(100 * i / total)
-            if p % 5 == 0 and p not in progress:
-                print("<{}>: Thread {} is {}% finished".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                                               thread_number, p))
+            if is_last and p % 5 == 0 and p not in progress:
+                print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), p))
                 progress.append(p)
 
     def update_products(self, limit=False):
