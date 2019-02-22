@@ -120,9 +120,6 @@ class API:
             self._current_products = {}
             for product in products:
                 all_products[product.id] = product
-            i += 1
-            self.debug("Getting page {}".format(i))
-            products = shopify.Product.find(limit=250, page=i)
 
             total = len(inventory.keys())
             progress = []
@@ -151,6 +148,10 @@ class API:
                                                           int(len(self._current_products.keys()) / 10)))):
                 t = Thread(target=self.save_thread, args=(x, products,))
                 t.start()
+
+            i += 1
+            self.debug("Getting page {}".format(i))
+            products = shopify.Product.find(limit=250, page=i)
             # total = len(self._current_products.keys())
             # progress = []
             # for i, (pid, product) in enumerate(self._current_products.items()):
