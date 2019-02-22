@@ -112,14 +112,16 @@ class API:
         self.debug("Parsing Inventory File")
         df = pd.read_csv(os.path.join('files', self._inventory_file), delimiter=',', engine='python')
 
-        i = 0
-        self.debug("Getting page {}".format(i))
-        products = shopify.Product.find(limit=250, page=i)
         while len(products) > 0:
             all_products = {}
             self._current_products = {}
-            for product in products:
-                all_products[product.id] = product
+            z = 0
+            for _ in range(3):
+                self.debug("Getting page {}".format(z))
+                products = shopify.Product.find(limit=250, page=z)
+                z += 1
+                for product in products:
+                    all_products[product.id] = product
 
             total = len(inventory.keys())
             progress = []
@@ -144,14 +146,11 @@ class API:
                     progress.append(p)
             self.debug("100%\n")
 
-            for x, products in enumerate(list(self.chunks([i for k, i in self._current_products.items()],
-                                                          int(len(self._current_products.keys()) / 10)))):
-                t = Thread(target=self.save_thread, args=(x, products,))
+            for x, ps in enumerate(list(self.chunks([i for k, i in self._current_products.items()],
+                                                    int(len(self._current_products.keys()) / 10)))):
+                t = Thread(target=self.save_thread, args=(x, ps,))
                 t.start()
 
-            i += 1
-            self.debug("Getting page {}".format(i))
-            products = shopify.Product.find(limit=250, page=i)
             # total = len(self._current_products.keys())
             # progress = []
             # for i, (pid, product) in enumerate(self._current_products.items()):
