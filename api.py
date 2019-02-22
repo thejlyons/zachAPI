@@ -98,17 +98,6 @@ class API:
                                                                  os.environ["SHOPIFY_STORE"])
         shopify.ShopifyResource.set_site(shop_url)
 
-        all_products = {}
-        i = 0
-        self.debug("Getting page {}".format(i))
-        products = shopify.Product.find(limit=250, page=i)
-        while len(products) > 0:
-            for product in products:
-                all_products[product.id] = product
-            i += 1
-            self.debug("Getting page {}".format(i))
-            products = shopify.Product.find(limit=250, page=i)
-
         if not self._db:
             self._db = self.init_mongodb()
 
@@ -123,43 +112,55 @@ class API:
         self.debug("Parsing Inventory File")
         df = pd.read_csv(os.path.join('files', self._inventory_file), delimiter=',', engine='python')
 
-        total = len(inventory.keys())
-        progress = []
-        for i, (item_number, item) in enumerate(inventory.items()):
-            row = df.loc[df['Item Number'] == item_number]
-            if not row.empty:
-                if item["product_id"] not in self._current_products:
-                    try:
-                        self._current_products[item["product_id"]] = all_products[item["product_id"]]
-                    except KeyError:
-                        pass
+        i = 0
+        self.debug("Getting page {}".format(i))
+        products = shopify.Product.find(limit=250, page=i)
+        while len(products) > 0:
+            all_products = {}
+            self._current_products = {}
+            for product in products:
+                all_products[product.id] = product
+            i += 1
+            self.debug("Getting page {}".format(i))
+            products = shopify.Product.find(limit=250, page=i)
 
-                if item["product_id"] in self._current_products:
-                    for x in range(len(self._current_products[item["product_id"]].variants)):
-                        if item["variant_id"] == self._current_products[item["product_id"]].variants[x].id:
-                            self._current_products[item["product_id"]].variants[x].inventory_quantity = int(
-                                row["Total Inventory"].values[0])
+            total = len(inventory.keys())
+            progress = []
+            for i, (item_number, item) in enumerate(inventory.items()):
+                row = df.loc[df['Item Number'] == item_number]
+                if not row.empty:
+                    if item["product_id"] not in self._current_products:
+                        try:
+                            self._current_products[item["product_id"]] = all_products[item["product_id"]]
+                        except KeyError:
+                            pass
 
-            p = int(100 * i / total)
-            if p % 5 == 0 and p not in progress:
-                self.debug("{}%".format(p))
-                progress.append(p)
-        self.debug("100%\n")
+                    if item["product_id"] in self._current_products:
+                        for x in range(len(self._current_products[item["product_id"]].variants)):
+                            if item["variant_id"] == self._current_products[item["product_id"]].variants[x].id:
+                                self._current_products[item["product_id"]].variants[x].inventory_quantity = int(
+                                    row["Total Inventory"].values[0])
 
-        for x, products in enumerate(list(self.chunks([i for k, i in self._current_products.items()],
-                                                      int(len(self._current_products.keys()) / 10)))):
-            t = Thread(target=self.save_thread, args=(x, products,))
-            t.start()
-        total = len(self._current_products.keys())
-        progress = []
-        for i, (pid, product) in enumerate(self._current_products.items()):
-            sleep(0.5)
-            product.save()
+                p = int(100 * i / total)
+                if p % 5 == 0 and p not in progress:
+                    self.debug("{}%".format(p))
+                    progress.append(p)
+            self.debug("100%\n")
 
-            p = int(100 * i / total)
-            if p % 5 == 0 and p not in progress:
-                self.debug("{}%".format(p))
-                progress.append(p)
+            for x, products in enumerate(list(self.chunks([i for k, i in self._current_products.items()],
+                                                          int(len(self._current_products.keys()) / 10)))):
+                t = Thread(target=self.save_thread, args=(x, products,))
+                t.start()
+            # total = len(self._current_products.keys())
+            # progress = []
+            # for i, (pid, product) in enumerate(self._current_products.items()):
+            #     sleep(0.5)
+            #     product.save()
+            #
+            #     p = int(100 * i / total)
+            #     if p % 5 == 0 and p not in progress:
+            #         self.debug("{}%".format(p))
+            #         progress.append(p)
 
         self.debug("100%\n")
         self._clean()
