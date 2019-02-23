@@ -21,7 +21,7 @@ if __name__ == '__main__':
 
     api = API(True, True)
     if os.environ["UPDATE"] == "products":
-        api.update_products(True)
+        api.update_products()
     else:
         api.update_inventory()
     print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))

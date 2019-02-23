@@ -10,7 +10,7 @@ from pyactiveresource.connection import ResourceNotFound, ServerError
 import pandas as pd
 from datetime import datetime
 from time import sleep
-from multiprocessing import Process, Manager, Lock
+from multiprocessing import Process, Manager, Lock, Queue, Value
 import shopify_limits
 
 
@@ -87,7 +87,6 @@ class API:
 
     def update_inventory(self):
         """Update all product inventory values."""
-        self._current_products = {}
         if self._download:
             self.debug("Downloading files.")
             self.prepare_inventory()
@@ -114,7 +113,6 @@ class API:
 
         z = 0
         while True:
-            self._current_products = {}
             self.debug("Getting page {}".format(z))
             products = shopify.Product.find(limit=250, page=z)
             z += 1
@@ -123,8 +121,8 @@ class API:
 
             for i in range(len(products)):
                 for j in range(len(products[i].variants)):
-                    pid = products[i].id
-                    vid = products[i].variants[j].id
+                    pid = str(products[i].id)
+                    vid = str(products[i].variants[j].id)
                     if pid in self._product_ids and vid in self._product_ids[pid]:
                         item = self._product_ids[pid][vid]
                         row = df.loc[df['Item Number'] == item]
@@ -132,7 +130,7 @@ class API:
                             products[i].variants[j].inventory_quantity = int(row["Total Inventory"].values[0])
 
             processes = []
-            chunks = list(self.chunks(products, int(len(products) / 10)))
+            chunks = list(self.chunks(products, int(len(products) / int(os.environ["NUM_THREADS"]))))
             for ps in chunks:
                 p = Process(target=self.save_thread, args=(ps, bool(ps == chunks[-1],)))
                 p.daemon = True
@@ -147,6 +145,13 @@ class API:
     @staticmethod
     def save_thread(products, is_last):
         """Thread for saving a list of products."""
+        import shopify
+
+        shop_url = "https://{}:{}@{}.myshopify.com/admin".format(os.environ["SHOPIFY_API_KEY"],
+                                                                 os.environ["SHOPIFY_PASSWORD"],
+                                                                 os.environ["SHOPIFY_STORE"])
+        shopify.ShopifyResource.set_site(shop_url)
+
         total = len(products)
         progress = []
         for i, product in enumerate(products):
@@ -361,8 +366,8 @@ class API:
 
     def start_save_processes(self):
         """Create Processes that will save all the changes."""
-        self.debug("Finding images.")
-        self.find_images()
+        # self.debug("Finding images.")
+        # self.find_images()
 
         self.debug("Setting metafields.")
         total = len(self._current_products.keys())
@@ -411,20 +416,23 @@ class API:
 
         self.debug("Starting processes.")
         processes = []
-        lock = Lock()
 
         manager = Manager()
         ns = manager.Namespace()
-        ns.products = [(k, i) for k, i in self._current_products.items()]
+        products = Queue()
+        for k, i in self._current_products.items():
+            products.put((k, i))
         ns.progress = []
         ns.shopify_ids = self._shopify_ids
-        ns.product_ids = self._product_ids
-        ns.images = self._images
+        shopify_ids = manager.dict()
+        ns.skip_existing = bool(os.environ['SKIP_EXISTING'] == "True")
         ns.inventory = self._inventory
+        index = Value("i", 0)
         total = len(self._current_products.keys())
 
-        for i in range(15):
-            p = Process(target=self.save_new_products, args=(ns, lock, total,))
+        r = int(os.environ["NUM_THREADS"]) if int(os.environ["NUM_THREADS"]) < total else total
+        for i in range(r):
+            p = Process(target=self.save_new_products, args=(ns, products, index, shopify_ids, total,))
             p.daemon = True
             p.start()
             processes.append(p)
@@ -432,25 +440,54 @@ class API:
         for p in processes:
             p.join()
 
-        self._shopify_ids = ns.shopify_ids
-        self._product_ids = ns.product_ids
+        for key, item in shopify_ids.items():
+            self._shopify_ids[key] = item
+            self._product_ids.setdefault(str(item["product_id"]), {})[str(item["variant_id"])] = key
 
     @staticmethod
-    def save_new_products(ns, lock, total):
+    def save_new_products(ns, products, index, shopify_ids, total):
         """Loop through self._current_products and save the last in each list"""
         import shopify
+
+        def find_image(filename, product_id):
+            """Check if image in self._images otherwise download and create it."""
+            if isinstance(filename, str):
+                hires = filename.split(".")
+                hires[-2] = ''.join([hires[-2][:-1], 'z'])
+                hires = ".".join(hires)
+                url = "https://www.alphabroder.com/media/hires/{}".format(hires)
+
+                file_location = os.path.join('images', hires)
+
+                opener = urllib.request.build_opener()
+                opener.addheaders = [('User-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                                                    '(KHTML, like Gecko) Chrome/71.0.3578.98 Safari/537.36')]
+                urllib.request.install_opener(opener)
+
+                try:
+                    urllib.request.urlretrieve(url, file_location)
+                    image = shopify.Image({"product_id": product_id})
+                except HTTPError:
+                    image = None
+
+                if image:
+                    with open(file_location, 'rb') as f:
+                        encoded = f.read()
+                        image.attach_image(encoded, file_location)
+                        image.save()
+                return image
+            else:
+                return None
 
         shop_url = "https://{}:{}@{}.myshopify.com/admin".format(os.environ["SHOPIFY_API_KEY"],
                                                                  os.environ["SHOPIFY_PASSWORD"],
                                                                  os.environ["SHOPIFY_STORE"])
         shopify.ShopifyResource.set_site(shop_url)
 
-        remaining = len(ns.products)
-        while remaining:
-            style = ""
-            products = []
-            with lock:
-                style, products = ns.products.pop()
+        while index.value < total:
+            current = index.value
+            index.value += 1
+            style, products = products.get()
 
             if len(products) > 4:
                 print("----Check {}----".format(style))
@@ -468,32 +505,41 @@ class API:
                 product.options = [{"name": "Size", "values": [v.attributes[size_option] for v in product.variants]},
                                    {"name": "Color", "values": [v.attributes[color_option] for v in product.variants]}]
                 product.save()
-
+                images = {}
                 for variant in product.variants:
                     row = ns.inventory.loc[
                         (ns.inventory["Style"] == style)
                         & (ns.inventory["Color Name"] == str(variant.attributes[color_option]).upper())
                         & (ns.inventory["Size"] == variant.attributes[size_option])
                     ]
-                    if not row.empty and row["Item Number"].values[0] not in ns.shopify_ids:
-                        filename = row["Front of Image Name"].values[0]
-                        image = ns.images[filename].get("image", None)
+                    if not row.empty and (not ns.skip_existing or row["Item Number"].values[0] not in ns.shopify_ids):
+                        fn = row["Front of Image Name"].values[0]
+                        image = images.get(fn, None)
+                        if not image:
+                            image = find_image(fn, product.id)
+                            images[fn] = image
                         if image:
                             variant.image_id = image.id
                             variant.save()
-                        with lock:
-                            ns.shopify_ids[row["Item Number"].values[0]] = {
+
+                            shopify_ids[row["Item Number"].values[0]] = {
                                 "variant_id": variant.id,
                                 "product_id": product.id
                             }
-                            ns.product_ids.setdefault(str(product.id), {})[str(variant.id)] = row[
-                                "Item Number"].values[0]
 
-                    remaining = len(ns.products)
-                    p = int(100 * (total - remaining) / total)
-                    if p not in ns.progress:
-                        print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), p))
-                        ns.progress.append(p)
+                #             images[variant.id] = image
+                # product.images += [image for k, image in images.items()]
+                # product.save()
+                # for variant in product.variants:
+                #     if variant.id in images and images[variant.id]:
+                #         images[]
+                #         variant.image_id = images[variant.id].id
+                #         variant.save()
+
+            p = int(100 * current / total)
+            if p not in ns.progress:
+                print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), p))
+                ns.progress.append(p)
 
     def new_product(self, mill_name, style, short_description, category, color_index):
         """Create a new Shopify product with the given data."""
@@ -532,46 +578,16 @@ class API:
 
         ftp.quit()
 
-    def find_images(self):
-        """Find all images."""
-        total = len(self._images.keys())
-        progress = []
-        for i, (filename, image_data) in enumerate(self._images.items()):
-            self.find_image(filename, image_data["product_id"])
-            p = int(100 * i / total)
-            if p not in progress:
-                self.debug("{}%".format(p))
-                progress.append(p)
-
-    def find_image(self, filename, product_id):
-        """Check if image in self._images otherwise download and create it."""
-        image = self._images[filename].get("image", None)
-        if not image or image.product_id != product_id:
-            if isinstance(filename, str):
-                hires = filename.split(".")
-                hires[-2] = ''.join([hires[-2][:-1], 'z'])
-                hires = ".".join(hires)
-                url = self._image_url(hires)
-
-                file_location = os.path.join('images', hires)
-
-                opener = urllib.request.build_opener()
-                opener.addheaders = [('User-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-                                                    '(KHTML, like Gecko) Chrome/71.0.3578.98 Safari/537.36')]
-                urllib.request.install_opener(opener)
-
-                try:
-                    urllib.request.urlretrieve(url, file_location)
-                    image = shopify.Image({"product_id": product_id})
-                except HTTPError:
-                    image = None
-
-                if image:
-                    with open(file_location, 'rb') as f:
-                        encoded = f.read()
-                        image.attach_image(encoded, file_location)
-                        image.save()
-                    self._images[filename]["image"] = image
+    # def find_images(self):
+    #     """Find all images."""
+    #     total = len(self._images.keys())
+    #     progress = []
+    #     for i, (filename, image_data) in enumerate(self._images.items()):
+    #         self.find_image(filename, image_data["product_id"])
+    #         p = int(100 * i / total)
+    #         if p not in progress:
+    #             self.debug("{}%".format(p))
+    #             progress.append(p)
 
     def _clean(self):
         """Remove all downloaded files."""
