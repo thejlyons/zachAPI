@@ -1,17 +1,21 @@
 """API Class for product and inventory management."""
 import os
 import re
+import sys
 import pymongo
 import shopify
 from ftplib import FTP_TLS
 import urllib.request
-from urllib.error import HTTPError
-from pyactiveresource.connection import ResourceNotFound, ServerError
+from urllib.error import HTTPError, URLError
+from pyactiveresource.connection import ResourceNotFound, ServerError, Error, BadRequest
 import pandas as pd
 from datetime import datetime
 from time import sleep
 from multiprocessing import Process, Manager, Lock, Queue, Value
 import shopify_limits
+from unidecode import unidecode
+from ssl import SSLEOFError
+
 
 
 class API:
@@ -73,6 +77,7 @@ class API:
     _price_file = 'AllDBInfoALP_PRC_R034.txt'
     _inventory_file = 'inventory-v8-alp.txt'
     _progress = []
+    _save = False
     # _categories = ['Polos', 'Outerwear', 'Fleece', 'Sweatshirts', 'Woven Shirts', 'T-Shirts', 'Infants | Toddlers']
 
     def __init__(self, download=True, debug=False):
@@ -146,6 +151,7 @@ class API:
     def save_thread(products, is_last):
         """Thread for saving a list of products."""
         import shopify
+        import shopify_limits
 
         shop_url = "https://{}:{}@{}.myshopify.com/admin".format(os.environ["SHOPIFY_API_KEY"],
                                                                  os.environ["SHOPIFY_PASSWORD"],
@@ -161,6 +167,19 @@ class API:
                 pass
             except ResourceNotFound:
                 pass
+            except BadRequest:
+                sleep(40)
+                try:
+                    product.save()
+                except HTTPError:
+                    pass
+                except ResourceNotFound:
+                    pass
+                except BadRequest:
+                    sleep(40)
+                    s = "Coudn't save {}".format(product.id)
+                    print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), s))
+
             p = int(100 * i / total)
             if is_last and p % 5 == 0 and p not in progress:
                 print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), p))
@@ -168,7 +187,7 @@ class API:
         if is_last:
             print("<{}>: 100%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
 
-    def update_products(self, limit=False):
+    def update_products(self, limit=0):
         """Update all products."""
         if self._download:
             self.debug("Downloading files.")
@@ -217,8 +236,8 @@ class API:
         self._inventory.sort_values('Style')
 
         self.debug(self._inventory.shape[0])
-        if limit:
-            self._inventory = self._inventory.head(250)
+        if limit > 0:
+            self._inventory = self._inventory.head(limit)
 
         self.debug("Processing products.")
         total = self._inventory.shape[0]
@@ -255,21 +274,22 @@ class API:
         self.debug("Saving new products.")
         self.start_save_processes()
 
-        self.debug("Updating Database.")
-        for key, item in inventory_store.items():
-            self._shopify_ids[key] = item
-        self._db.inventory.delete_many({})
-        self._db.inventory.insert_one(self._shopify_ids)
-        self._db.products.delete_many({})
-        self._db.products.insert_one(self._product_ids)
+        if self._save:
+            self.debug("Updating Database.")
+            for key, item in inventory_store.items():
+                self._shopify_ids[key] = item
+            self._db.inventory.delete_many({})
+            self._db.inventory.insert_one(self._shopify_ids)
+            self._db.products.delete_many({})
+            self._db.products.insert_one(self._product_ids)
+        else:
+            self.debug("Errors found. Skipping save.")
         self._clean()
 
         print(", ".join(self._styles_to_fix))
 
     def process_item(self, item, of_color):
         """Check if item already exists. If not, create a new variant and add it."""
-
-        """Update item in the Shopify store."""
         skip = False
 
         similar_variants = 0
@@ -307,7 +327,7 @@ class API:
                 break
         if not skip:
             if not product:
-                product = self.new_product(item["Mill Name"], item["Style"], item["Short Description"],
+                product = self.new_product(item["Mill Name"], item["Style"], unidecode(item["Short Description"]),
                                            item["Category"], len(self._current_products[item["Style"]]))
 
             color_option = ""
@@ -331,7 +351,7 @@ class API:
 
                 size_option = 'option1'
                 color_option = 'option2'
-                product = self.new_product(item["Mill Name"], item["Style"], item["Short Description"],
+                product = self.new_product(item["Mill Name"], item["Style"], unidecode(item["Short Description"]),
                                            item["Category"], len(self._current_products[item["Style"]]))
 
             if self._prices is None:
@@ -366,9 +386,6 @@ class API:
 
     def start_save_processes(self):
         """Create Processes that will save all the changes."""
-        # self.debug("Finding images.")
-        # self.find_images()
-
         self.debug("Setting metafields.")
         total = len(self._current_products.keys())
         progress = []
@@ -419,9 +436,7 @@ class API:
 
         manager = Manager()
         ns = manager.Namespace()
-        products = Queue()
-        for k, i in self._current_products.items():
-            products.put((k, i))
+        ns.products = [(k, i) for k, i in self._current_products.items()]
         ns.progress = []
         ns.shopify_ids = self._shopify_ids
         shopify_ids = manager.dict()
@@ -432,22 +447,26 @@ class API:
 
         r = int(os.environ["NUM_THREADS"]) if int(os.environ["NUM_THREADS"]) < total else total
         for i in range(r):
-            p = Process(target=self.save_new_products, args=(ns, products, index, shopify_ids, total,))
+            p = Process(target=self.save_new_products, args=(ns, index, shopify_ids, total,))
             p.daemon = True
             p.start()
             processes.append(p)
 
+        self._save = True
         for p in processes:
             p.join()
+            if p.exitcode > 0:
+                self._save = False
 
         for key, item in shopify_ids.items():
             self._shopify_ids[key] = item
             self._product_ids.setdefault(str(item["product_id"]), {})[str(item["variant_id"])] = key
 
     @staticmethod
-    def save_new_products(ns, products, index, shopify_ids, total):
+    def save_new_products(ns, index, shopify_ids, total):
         """Loop through self._current_products and save the last in each list"""
         import shopify
+        import shopify_limits
 
         def find_image(filename, product_id):
             """Check if image in self._images otherwise download and create it."""
@@ -484,10 +503,15 @@ class API:
                                                                  os.environ["SHOPIFY_STORE"])
         shopify.ShopifyResource.set_site(shop_url)
 
-        while index.value < total:
-            current = index.value
-            index.value += 1
-            style, products = products.get()
+        current = 0
+        while True:
+            with index.get_lock():
+                current = index.value
+                index.value += 1
+            if current >= total:
+                break
+
+            style, products = ns.products[current]
 
             if len(products) > 4:
                 print("----Check {}----".format(style))
@@ -504,15 +528,34 @@ class API:
                     color_option = 'option2'
                 product.options = [{"name": "Size", "values": [v.attributes[size_option] for v in product.variants]},
                                    {"name": "Color", "values": [v.attributes[color_option] for v in product.variants]}]
-                product.save()
+                try:
+                    product.save()
+                except SSLEOFError:
+                    pass
+                except URLError:
+                    pass
+                except Error:
+                    sleep(120)
+                    try:
+                        product.save()
+                    except SSLEOFError:
+                        pass
+                    except URLError:
+                        pass
+                    except Error:
+                        sleep(120)
+                        e = "Could not save {}".format(product.handle)
+                        print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), e))
+                        continue
+
                 images = {}
                 for variant in product.variants:
                     row = ns.inventory.loc[
                         (ns.inventory["Style"] == style)
                         & (ns.inventory["Color Name"] == str(variant.attributes[color_option]).upper())
                         & (ns.inventory["Size"] == variant.attributes[size_option])
-                    ]
-                    if not row.empty and (not ns.skip_existing or row["Item Number"].values[0] not in ns.shopify_ids):
+                        ]
+                    if not row.empty and row["Item Number"].values[0] not in ns.shopify_ids:
                         fn = row["Front of Image Name"].values[0]
                         image = images.get(fn, None)
                         if not image:
@@ -520,21 +563,32 @@ class API:
                             images[fn] = image
                         if image:
                             variant.image_id = image.id
-                            variant.save()
-
-                            shopify_ids[row["Item Number"].values[0]] = {
-                                "variant_id": variant.id,
-                                "product_id": product.id
-                            }
-
-                #             images[variant.id] = image
-                # product.images += [image for k, image in images.items()]
-                # product.save()
-                # for variant in product.variants:
-                #     if variant.id in images and images[variant.id]:
-                #         images[]
-                #         variant.image_id = images[variant.id].id
-                #         variant.save()
+                            try:
+                                variant.save()
+                                shopify_ids[row["Item Number"].values[0]] = {
+                                    "variant_id": variant.id,
+                                    "product_id": product.id
+                                }
+                            except SSLEOFError:
+                                pass
+                            except URLError:
+                                pass
+                            except Error:
+                                sleep(120)
+                                try:
+                                    variant.save()
+                                    shopify_ids[row["Item Number"].values[0]] = {
+                                        "variant_id": variant.id,
+                                        "product_id": product.id
+                                    }
+                                except SSLEOFError:
+                                    pass
+                                except URLError:
+                                    pass
+                                except Error:
+                                    sleep(120)
+                                    e = "Could not save {}".format(row["Item Number"].values[0])
+                                    print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), e))
 
             p = int(100 * current / total)
             if p not in ns.progress:

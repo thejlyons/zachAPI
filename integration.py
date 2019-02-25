@@ -21,7 +21,8 @@ if __name__ == '__main__':
 
     api = API(True, True)
     if os.environ["UPDATE"] == "products":
-        api.update_products()
+        limit = int(os.environ["LIMIT"])
+        api.update_products(limit=limit)
     else:
         api.update_inventory()
     print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))

@@ -3,7 +3,7 @@ import time
 
 import pyactiveresource.connection
 from shopify.base import ShopifyConnection
-
+import sys
 
 def patch_shopify_with_limits():
     """Add limits"""
@@ -21,6 +21,9 @@ def patch_shopify_with_limits():
                     time.sleep(retry_after)
                 else:
                     raise e
+            except pyactiveresource.connection.ServerError as e:
+                print(e, file=sys.stderr)
+                time.sleep(30)
 
     ShopifyConnection._open = patched_open
 
