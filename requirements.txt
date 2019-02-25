@@ -9,3 +9,4 @@ pytz==2018.9
 PyYAML==3.13
 ShopifyAPI==4.0.0
 six==1.12.0
+Unidecode==1.0.23
