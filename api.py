@@ -15,7 +15,7 @@ from multiprocessing import Process, Manager, Lock, Queue, Value
 import shopify_limits
 from unidecode import unidecode
 from ssl import SSLEOFError
-
+from http.client import RemoteDisconnected
 
 
 class API:
@@ -74,7 +74,7 @@ class API:
                      "Extended Colors 7", "Extended Colors 8", "Extended Colors 9", "Extended Colors 10"]
     _image_url = "https://www.alphabroder.com/media/hires/{}".format
     _product_file = 'AllDBInfoALP_Prod.txt'
-    _price_file = 'AllDBInfoALP_PRC_R034.txt'
+    _price_file = 'AllDBInfoALP_PRC_R064.txt'
     _inventory_file = 'inventory-v8-alp.txt'
     _progress = []
     _save = False
@@ -133,6 +133,7 @@ class API:
                         row = df.loc[df['Item Number'] == item]
                         if not row.empty:
                             products[i].variants[j].inventory_quantity = int(row["Total Inventory"].values[0])
+                            products[i].variants[j].inventory_management = 'shopify'
 
             processes = []
             chunks = list(self.chunks(products, int(len(products) / int(os.environ["NUM_THREADS"]))))
@@ -167,7 +168,7 @@ class API:
                 pass
             except ResourceNotFound:
                 pass
-            except BadRequest:
+            except (BadRequest, ValueError):
                 sleep(40)
                 try:
                     product.save()
@@ -175,7 +176,7 @@ class API:
                     pass
                 except ResourceNotFound:
                     pass
-                except BadRequest:
+                except (BadRequest, ValueError):
                     sleep(40)
                     s = "Coudn't save {}".format(product.id)
                     print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), s))
@@ -241,7 +242,6 @@ class API:
 
         self.debug("Processing products.")
         total = self._inventory.shape[0]
-        self.debug(total)
         progress = []
         for i, (index, item) in enumerate(self._inventory.iterrows()):
             if 'Drop Ship' in item["Mill Name"]:
@@ -255,9 +255,14 @@ class API:
                         style = style[0].split(" ")[-1]
                         if item["Style"] == style:
                             if len(product.options) > 0 and product.options[0].name == 'Color':
-                                print("----{} needs fixed.----".format(item["Style"]))
+                                for x in range(len(product.variants)):
+                                    product.variants[x].option2, product.variants[x].option1 = (
+                                        product.variants[x].option1, product.variants[x].option2
+                                    )
+                                product.options.reverse()
+                                product.save()
+                                print("----{} needs checked.----".format(item["Style"]))
                                 self._styles_to_fix.append(item["Style"])
-                                product = shopify.Product.find(product.id)
                             if len(product.variants) == 1 and product.variants[0].title == 'Default Title':
                                 product.variants = []
                             products.append(product)
@@ -328,7 +333,8 @@ class API:
         if not skip:
             if not product:
                 product = self.new_product(item["Mill Name"], item["Style"], unidecode(item["Short Description"]),
-                                           item["Category"], len(self._current_products[item["Style"]]))
+                                           item["Full Feature Description"], item["Category"],
+                                           len(self._current_products[item["Style"]]))
 
             color_option = ""
             size_option = ""
@@ -352,7 +358,8 @@ class API:
                 size_option = 'option1'
                 color_option = 'option2'
                 product = self.new_product(item["Mill Name"], item["Style"], unidecode(item["Short Description"]),
-                                           item["Category"], len(self._current_products[item["Style"]]))
+                                           item["Full Feature Description"], item["Category"],
+                                           len(self._current_products[item["Style"]]))
 
             if self._prices is None:
                 self._prices = pd.read_csv(os.path.join('files', self._price_file), delimiter='^', engine='python')
@@ -493,7 +500,14 @@ class API:
                     with open(file_location, 'rb') as f:
                         encoded = f.read()
                         image.attach_image(encoded, file_location)
-                        image.save()
+                        try:
+                            image.save()
+                        except RemoteDisconnected:
+                            sleep(300)
+                            try:
+                                image.save()
+                            except RemoteDisconnected:
+                                pass
                 return image
             else:
                 return None
@@ -513,8 +527,6 @@ class API:
 
             style, products = ns.products[current]
 
-            if len(products) > 4:
-                print("----Check {}----".format(style))
             for product in products:
                 color_option = ""
                 size_option = ""
@@ -534,16 +546,16 @@ class API:
                     pass
                 except URLError:
                     pass
-                except Error:
-                    sleep(120)
+                except (HTTPError, Error, ValueError):
+                    sleep(30)
                     try:
                         product.save()
                     except SSLEOFError:
                         pass
                     except URLError:
                         pass
-                    except Error:
-                        sleep(120)
+                    except (HTTPError, Error, ValueError):
+                        sleep(30)
                         e = "Could not save {}".format(product.handle)
                         print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), e))
                         continue
@@ -574,7 +586,7 @@ class API:
                             except URLError:
                                 pass
                             except Error:
-                                sleep(120)
+                                sleep(300)
                                 try:
                                     variant.save()
                                     shopify_ids[row["Item Number"].values[0]] = {
@@ -586,7 +598,7 @@ class API:
                                 except URLError:
                                     pass
                                 except Error:
-                                    sleep(120)
+                                    sleep(300)
                                     e = "Could not save {}".format(row["Item Number"].values[0])
                                     print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), e))
 
@@ -595,7 +607,7 @@ class API:
                 print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), p))
                 ns.progress.append(p)
 
-    def new_product(self, mill_name, style, short_description, category, color_index):
+    def new_product(self, mill_name, style, short_description, full_description, category, color_index):
         """Create a new Shopify product with the given data."""
         new_product = shopify.Product()
         title = "{} {}: {}".format(mill_name, style, short_description)
@@ -607,6 +619,8 @@ class API:
                 color = self._color_groups[color_index]
             title = "{}, {}".format(title, color)
         new_product.title = title
+        new_product.body_html = "<ul><li>{}</li></ul>".format("</li><li>".join(
+            [li.strip() for li in full_description.split(";")]))
         new_product.vendor = mill_name
         new_product.product_type = category
         new_product.save()

@@ -11,19 +11,26 @@ def patch_shopify_with_limits():
 
     def patched_open(self, *args, **kwargs):
         """Add limits."""
-        while True:
+        error = None
+        for _ in range(4):
+            error = None
             try:
                 return func(self, *args, **kwargs)
 
             except pyactiveresource.connection.ClientError as e:
+                error = "ClientError"
                 if e.response.code == 429:
                     retry_after = float(e.response.headers.get('Retry-After', 4))
                     time.sleep(retry_after)
                 else:
                     raise e
             except pyactiveresource.connection.ServerError as e:
+                error = "ServerError"
                 print(e, file=sys.stderr)
-                time.sleep(30)
+                time.sleep(60)
+
+        if error:
+            raise ValueError("Could not complete request.")
 
     ShopifyConnection._open = patched_open
 
