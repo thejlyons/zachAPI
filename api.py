@@ -90,6 +90,7 @@ class API:
         self._styles_to_fix = []
         self._categories = os.environ['CATEGORIES'].split(",")
 
+
     def update_inventory(self):
         """Update all product inventory values."""
         if self._download:
@@ -416,7 +417,8 @@ class API:
                             mf.value = main_product
                         elif mf.key == 'other_product':
                             op = True
-                            mf.value = other_products
+                            if other_products:
+                                mf.value = other_products
                         mf.save()
 
                 if not mp:
@@ -426,7 +428,7 @@ class API:
                         'value_type': 'string',
                         'namespace': 'api_integration'
                     }))
-                if not op:
+                if not op and other_products:
                     self._current_products[key][x].add_metafield(shopify.Metafield({
                         'key': 'other_products',
                         'value': ",".join(other_products),

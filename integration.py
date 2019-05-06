@@ -19,7 +19,7 @@ if __name__ == '__main__':
     if not os.path.exists(images):
         os.mkdir(images)
 
-    api = API(True, True)
+    api = API(False, True)
     if os.environ["UPDATE"] == "products":
         limit = int(os.environ["LIMIT"])
         api.update_products(limit=limit)
