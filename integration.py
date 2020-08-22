@@ -20,6 +20,8 @@ if __name__ == '__main__':
         os.mkdir(images)
 
     api = API(False, True)
+
+    # api.prepare_inventory()
     if os.environ["UPDATE"] == "products":
         limit = int(os.environ["LIMIT"])
         api.update_products(limit=limit)

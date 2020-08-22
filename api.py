@@ -90,7 +90,6 @@ class API:
         self._styles_to_fix = []
         self._categories = os.environ['CATEGORIES'].split(",")
 
-
     def update_inventory(self):
         """Update all product inventory values."""
         if self._download:
@@ -120,7 +119,16 @@ class API:
         z = 0
         while True:
             self.debug("Getting page {}".format(z))
-            products = shopify.Product.find(limit=250, page=z)
+
+            products = []
+            if os.environ.get('ONLY_THESE') is not None:
+                for pid in os.environ['ONLY_THESE'].split(','):
+                    product = shopify.Product.find(pid)
+                    if product:
+                        products.append(product)
+            else:
+                products = shopify.Product.find(limit=250, page=z)
+
             z += 1
             if not products:
                 break
@@ -133,11 +141,16 @@ class API:
                         item = self._product_ids[pid][vid]
                         row = df.loc[df['Item Number'] == item]
                         if not row.empty:
-                            products[i].variants[j].inventory_quantity = int(row["Total Inventory"].values[0])
+                            total = int(row["Total Inventory"].values[0])
+                            total_drop_ship = int(row["DROP SHIP"].values[0])
+                            total -= total_drop_ship
+
+                            products[i].variants[j].inventory_quantity = total
                             products[i].variants[j].inventory_management = 'shopify'
 
             processes = []
-            chunks = list(self.chunks(products, int(len(products) / int(os.environ["NUM_THREADS"]))))
+            c = max(int(len(products) / int(os.environ["NUM_THREADS"])), 1)
+            chunks = list(self.chunks(products, c))
             for ps in chunks:
                 p = Process(target=self.save_thread, args=(ps, bool(ps == chunks[-1],)))
                 p.daemon = True
@@ -147,6 +160,10 @@ class API:
             for p in processes:
                 p.join()
 
+            if os.environ.get('ONLY_THESE') is not None:
+                break
+
+        # TODO: set to 0 products that weren't found
         self._clean()
 
     @staticmethod
@@ -228,10 +245,12 @@ class API:
                                               & ~self._inventory['Mill Name'].str.contains('Drop Ship',
                                                                                            flags=re.IGNORECASE,
                                                                                            regex=True)]
+
         if os.environ['SKIP_EXISTING'] == "True":
             self._inventory = self._inventory.loc[~self._inventory['Item Number'].isin(inventory_store.keys())]
-        if os.environ['ONLY_THESE']:
+        if os.environ.get('ONLY_THESE') is not None:
             these = os.environ['ONLY_THESE'].split(",")
+            self.debug(these)
             self._inventory = self._inventory.loc[self._inventory['Style'].isin(these)]
         self._inventory = self._inventory.replace({"Mill Name": {'Bella + Canvas': 'Bella+Canvas'}})
 
@@ -331,6 +350,8 @@ class API:
             if len(p.variants) + of_color - similar_variants < 100:
                 product = p
                 break
+
+        skip = True
         if not skip:
             if not product:
                 product = self.new_product(item["Mill Name"], item["Style"], unidecode(item["Short Description"]),
@@ -394,10 +415,14 @@ class API:
 
     def start_save_processes(self):
         """Create Processes that will save all the changes."""
+        global manager
+
         self.debug("Setting metafields.")
         total = len(self._current_products.keys())
         progress = []
         for i, key in enumerate(self._current_products):
+            if not self._current_products[key]:
+                continue
             main_product = ""
             for product in self._current_products[key]:
                 if product.body_html:
@@ -445,14 +470,14 @@ class API:
 
         manager = Manager()
         ns = manager.Namespace()
-        ns.products = [(k, i) for k, i in self._current_products.items()]
+        ns.products = [(k, i) for k, i in self._current_products.items() if i]
         ns.progress = []
         ns.shopify_ids = self._shopify_ids
         shopify_ids = manager.dict()
         ns.skip_existing = bool(os.environ['SKIP_EXISTING'] == "True")
         ns.inventory = self._inventory
         index = Value("i", 0)
-        total = len(self._current_products.keys())
+        total = len(ns.products)
 
         r = int(os.environ["NUM_THREADS"]) if int(os.environ["NUM_THREADS"]) < total else total
         for i in range(r):
