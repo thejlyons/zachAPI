@@ -4,7 +4,7 @@ import re
 import sys
 import pymongo
 import shopify
-from ftplib import FTP_TLS
+from ftplib import FTP_TLS, FTP
 import urllib.request
 from urllib.error import HTTPError, URLError
 from pyactiveresource.connection import ResourceNotFound, ServerError, Error, BadRequest
@@ -14,8 +14,10 @@ from time import sleep
 from multiprocessing import Process, Manager, Lock, Queue, Value
 import shopify_limits
 from unidecode import unidecode
+from html import unescape
 from ssl import SSLEOFError
 from http.client import RemoteDisconnected
+from urllib.parse import urlparse
 
 
 class API:
@@ -73,11 +75,14 @@ class API:
                      "Extended Colors 3", "Extended Colors 4", "Extended Colors 5", "Extended Colors 6",
                      "Extended Colors 7", "Extended Colors 8", "Extended Colors 9", "Extended Colors 10"]
     _image_url = "https://www.alphabroder.com/media/hires/{}".format
+    _product_file_sanmar = 'SanMar_EPDD.csv'
     _product_file = 'AllDBInfoALP_Prod.txt'
     _price_file = 'AllDBInfoALP_PRC_R064.txt'
     _inventory_file = 'inventory-v8-alp.txt'
     _progress = []
     _save = False
+    _sanmar = False
+    _skip_existing = True
     # _categories = ['Polos', 'Outerwear', 'Fleece', 'Sweatshirts', 'Woven Shirts', 'T-Shirts', 'Infants | Toddlers']
 
     def __init__(self, download=True, debug=False):
@@ -97,26 +102,23 @@ class API:
             self.prepare_inventory()
 
         self.debug("Connecting to shopify.")
-        shop_url = "https://{}:{}@{}.myshopify.com/admin".format(os.environ["SHOPIFY_API_KEY"],
-                                                                 os.environ["SHOPIFY_PASSWORD"],
-                                                                 os.environ["SHOPIFY_STORE"])
+        shop_url = "https://{}:{}@{}.myshopify.com/admin/api/2020-07".format(os.environ["SHOPIFY_API_KEY"],
+                                                                             os.environ["SHOPIFY_PASSWORD"],
+                                                                             os.environ["SHOPIFY_STORE"])
         shopify.ShopifyResource.set_site(shop_url)
 
         if not self._db:
             self._db = self.init_mongodb()
 
-        self._product_ids = self._db.products.find()
-        try:
-            self._product_ids = [item for item in self._product_ids][0]
-        except IndexError:
-            self._product_ids = []
-        self._product_ids = {key: self._product_ids[key] for key in self._product_ids if key != '_id'}
+        self._product_ids = self._sanitize_records(self._db.products.find())
 
         # Parse Inventory File
         self.debug("Parsing Inventory File")
-        df = pd.read_csv(os.path.join('files', self._inventory_file), delimiter=',', engine='python')
+        df_alpha = pd.read_csv(os.path.join('files', self._inventory_file), delimiter=',', engine='python')
+        df_sanmar = pd.read_csv(os.path.join('files', self._product_file_sanmar), delimiter=',', engine='python')
 
         z = 0
+        next_url = None
         while True:
             self.debug("Getting page {}".format(z))
 
@@ -127,7 +129,11 @@ class API:
                     if product:
                         products.append(product)
             else:
-                products = shopify.Product.find(limit=250, page=z)
+                products = shopify.Product.find(from_=next_url)
+                if products.has_next_page():
+                    next_url = products.next_page_url
+                else:
+                    next_url = None
 
             z += 1
             if not products:
@@ -139,28 +145,34 @@ class API:
                     vid = str(products[i].variants[j].id)
                     if pid in self._product_ids and vid in self._product_ids[pid]:
                         item = self._product_ids[pid][vid]
-                        row = df.loc[df['Item Number'] == item]
+
+                        sanmar = False
+                        row = df_alpha.loc[df_alpha['Item Number'].isin([item])]
+                        if row.empty:
+                            sanmar = True
+                            row = df_sanmar.loc[df_sanmar[k('Item Number', True)].isin([item])]
+
                         if not row.empty:
-                            total = int(row["Total Inventory"].values[0])
-                            total_drop_ship = int(row["DROP SHIP"].values[0])
+                            total = int(row[k("Total Inventory", sanmar)].values[0])
+                            total_drop_ship = 0 if sanmar else int(row["DROP SHIP"].values[0])
                             total -= total_drop_ship
 
-                            products[i].variants[j].inventory_quantity = total
-                            products[i].variants[j].inventory_management = 'shopify'
+                            iid = products[i].variants[j].inventory_item_id
+                            shopify.InventoryLevel.set(os.environ["SHOPIFY_LOCATION"], iid, max(0, total))
 
-            processes = []
-            c = max(int(len(products) / int(os.environ["NUM_THREADS"])), 1)
-            chunks = list(self.chunks(products, c))
-            for ps in chunks:
-                p = Process(target=self.save_thread, args=(ps, bool(ps == chunks[-1],)))
-                p.daemon = True
-                p.start()
-                processes.append(p)
+            # processes = []
+            # c = max(int(len(products) / int(os.environ["NUM_THREADS"])), 1)
+            # chunks = list(self.chunks(products, c))
+            # for ps in chunks:
+            #     p = Process(target=self.save_thread, args=(ps, bool(ps == chunks[-1],)))
+            #     p.daemon = True
+            #     p.start()
+            #     processes.append(p)
+            #
+            # for p in processes:
+            #     p.join()
 
-            for p in processes:
-                p.join()
-
-            if os.environ.get('ONLY_THESE') is not None:
+            if next_url is None:
                 break
 
         # TODO: set to 0 products that weren't found
@@ -172,10 +184,9 @@ class API:
         import shopify
         import shopify_limits
 
-        shop_url = "https://{}:{}@{}.myshopify.com/admin".format(os.environ["SHOPIFY_API_KEY"],
-                                                                 os.environ["SHOPIFY_PASSWORD"],
-                                                                 os.environ["SHOPIFY_STORE"])
-        shopify.ShopifyResource.set_site(shop_url)
+        shop_url = "https://{}:{}@{}.myshopify.com/admin/api/2020-07".format(os.environ["SHOPIFY_API_KEY"],
+                                                                             os.environ["SHOPIFY_PASSWORD"],
+                                                                             os.environ["SHOPIFY_STORE"])
 
         total = len(products)
         progress = []
@@ -206,16 +217,21 @@ class API:
         if is_last:
             print("<{}>: 100%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
 
-    def update_products(self, limit=0):
+    def update_products(self, limit=0, sanmar=False, skip_existing=True):
         """Update all products."""
+        self._sanmar = sanmar
+        if self._sanmar:
+            self._categories = os.environ['CATEGORIES_SANMAR'].split(",")
+        self._skip_existing = skip_existing
+
         if self._download:
             self.debug("Downloading files.")
             self.prepare_products()
 
         self.debug("Connecting to shopify.")
-        shop_url = "https://{}:{}@{}.myshopify.com/admin".format(os.environ["SHOPIFY_API_KEY"],
-                                                                 os.environ["SHOPIFY_PASSWORD"],
-                                                                 os.environ["SHOPIFY_STORE"])
+        shop_url = "https://{}:{}@{}.myshopify.com/admin/api/2020-07".format(os.environ["SHOPIFY_API_KEY"],
+                                                                             os.environ["SHOPIFY_PASSWORD"],
+                                                                             os.environ["SHOPIFY_STORE"])
         shopify.ShopifyResource.set_site(shop_url)
 
         self.debug("Retrieving database entries.")
@@ -224,56 +240,28 @@ class API:
         if not self._db:
             self._db = self.init_mongodb()
 
-        inventory_store = self._db.inventory.find()
-        self._product_ids = self._db.products.find()
-        try:
-            inventory_store = [item for item in inventory_store][0]
-        except IndexError:
-            inventory_store = []
-        inventory_store = {key: inventory_store[key] for key in inventory_store if key != '_id'}
-        try:
-            self._product_ids = [item for item in self._product_ids][0]
-        except IndexError:
-            self._product_ids = []
-        self._product_ids = {key: self._product_ids[key] for key in self._product_ids if key != '_id'}
+        inventory_store = self._sanitize_records(self._db.inventory.find())
+        self._product_ids = self._sanitize_records(self._db.products.find())
 
         # Parse Product File
         self.debug("Parsing Product File")
 
-        self._inventory = pd.read_csv(os.path.join('files', self._product_file), delimiter='^', engine='python')
-        self._inventory = self._inventory.loc[self._inventory['Category'].isin(self._categories)
-                                              & ~self._inventory['Mill Name'].str.contains('Drop Ship',
-                                                                                           flags=re.IGNORECASE,
-                                                                                           regex=True)]
-
-        if os.environ['SKIP_EXISTING'] == "True":
-            self._inventory = self._inventory.loc[~self._inventory['Item Number'].isin(inventory_store.keys())]
-        if os.environ.get('ONLY_THESE') is not None:
-            these = os.environ['ONLY_THESE'].split(",")
-            self.debug(these)
-            self._inventory = self._inventory.loc[self._inventory['Style'].isin(these)]
-        self._inventory = self._inventory.replace({"Mill Name": {'Bella + Canvas': 'Bella+Canvas'}})
-
-        self._inventory.sort_values('Style')
-
-        self.debug(self._inventory.shape[0])
-        if limit > 0:
-            self._inventory = self._inventory.head(limit)
+        self._load_product_file(inventory_store, limit)
 
         self.debug("Processing products.")
         total = self._inventory.shape[0]
         progress = []
         for i, (index, item) in enumerate(self._inventory.iterrows()):
-            if 'Drop Ship' in item["Mill Name"]:
+            if 'Drop Ship' in item[self.k("Mill Name")]:
                 continue
-            if item["Style"] not in self._current_products:
-                all_products = shopify.Product.find(limit=250, vendor=item["Mill Name"])
+            if item[self.k("Style")] not in self._current_products:
+                all_products = shopify.Product.find(limit=250, vendor=item[self.k("Mill Name")])
                 products = []
                 for product in all_products:
-                    if item["Style"] in product.title:
+                    if item[self.k("Style")] in product.title:
                         style = product.title.split(':')
                         style = style[0].split(" ")[-1]
-                        if item["Style"] == style:
+                        if item[self.k("Style")] == style:
                             if len(product.options) > 0 and product.options[0].name == 'Color':
                                 for x in range(len(product.variants)):
                                     product.variants[x].option2, product.variants[x].option1 = (
@@ -281,14 +269,15 @@ class API:
                                     )
                                 product.options.reverse()
                                 product.save()
-                                print("----{} needs checked.----".format(item["Style"]))
-                                self._styles_to_fix.append(item["Style"])
+                                print("----{} needs checked.----".format(item[self.k("Style")]))
+                                self._styles_to_fix.append(item[self.k("Style")])
                             if len(product.variants) == 1 and product.variants[0].title == 'Default Title':
                                 product.variants = []
                             products.append(product)
-                self._current_products[item["Style"]] = products
-            of_color = self._inventory.loc[(self._inventory["Style"] == item["Style"])
-                                           & (self._inventory["Color Name"] == item["Color Name"])].shape[0]
+                self._current_products[item[self.k("Style")]] = products
+            of_color = self._inventory.loc[(self._inventory[self.k("Style")] == item[self.k("Style")])
+                                           & (self._inventory[self.k("Color Name")] == item[self.k("Color Name")])
+                                           ].shape[0]
             self.process_item(item, of_color)
             p = int(100 * i / total)
             if p not in progress:
@@ -302,7 +291,7 @@ class API:
         if self._save:
             self.debug("Updating Database.")
             for key, item in inventory_store.items():
-                self._shopify_ids[key] = item
+                self._shopify_ids[str(key)] = item
             self._db.inventory.delete_many({})
             self._db.inventory.insert_one(self._shopify_ids)
             self._db.products.delete_many({})
@@ -318,45 +307,62 @@ class API:
         skip = False
 
         similar_variants = 0
-        for p in self._current_products[item["Style"]]:
+        for p in self._current_products[item[self.k("Style")]]:
             color_option = ""
-            color = item["Color Name"].lower()
+            color = item[self.k("Color Name")].lower()
             size_option = ""
-            size = item["Size"].lower()
+            size = item[self.k("Size")].lower()
 
-            for option in p.options:
-                if color in [o.lower() for o in option.values]:
-                    color_option = 'option{}'.format(option.position)
-                elif size in [o.lower() for o in option.values]:
-                    size_option = 'option{}'.format(option.position)
+            # for option in p.options:
+            #     if color in [o.lower() for o in option.values]:
+            #         color_option = 'option{}'.format(option.position)
+            #     elif size in [o.lower() for o in option.values]:
+            #         size_option = 'option{}'.format(option.position)
 
+            if len(p.options) >= 2:
+                for option in p.options:
+                    if option.name == 'Color':
+                        color_option = 'option{}'.format(option.position)
+                    if option.name == 'Size':
+                        size_option = 'option{}'.format(option.position)
+
+            self.debug('******************************')
+            self.debug(color_option)
+            self.debug(size_option)
+            self.debug(color)
+            self.debug(size)
+            self.debug('----------------')
             if color_option and size_option:
                 variant = None
                 for v in p.variants:
+                    self.debug(v.attributes[color_option].lower())
+                    self.debug(v.attributes[color_option].lower() == color)
+                    self.debug(v.attributes[size_option].lower())
+                    self.debug(v.attributes[size_option].lower() == size)
                     if v.attributes[color_option].lower() == color \
                             and v.attributes[size_option].lower() == size:
                         variant = v
+                        break
                 if variant:
-                    self._shopify_ids[item["Item Number"]] = {
+                    self._shopify_ids[str(item[self.k("Item Number")])] = {
                         "variant_id": variant.id,
                         "product_id": p.id
                     }
-                    self._product_ids.setdefault(str(p.id), {})[str(variant.id)] = item["Item Number"]
+                    self._product_ids.setdefault(str(p.id), {})[str(variant.id)] = str(item[self.k("Item Number")])
                     skip = True
                     break
-
+            self.debug('******************************')
         product = None
-        for p in self._current_products[item["Style"]]:
+        for p in self._current_products[item[self.k("Style")]]:
             if len(p.variants) + of_color - similar_variants < 100:
                 product = p
                 break
 
-        skip = True
         if not skip:
             if not product:
-                product = self.new_product(item["Mill Name"], item["Style"], unidecode(item["Short Description"]),
-                                           item["Full Feature Description"], item["Category"],
-                                           len(self._current_products[item["Style"]]))
+                product = self.new_product(item[self.k("Mill Name")], item[self.k("Style")],
+                                           self.get_description_short(item), item[self.k("Full Feature Description")],
+                                           item[self.k("Category")], len(self._current_products[item[self.k("Style")]]))
 
             color_option = ""
             size_option = ""
@@ -369,35 +375,25 @@ class API:
 
             # If total variants, plus the all of that color, mines the ones already made with the same color >= 100
             # then a new product needs created. Shopify limits 100 variants / product.
-            color = item["Color Name"].lower()
+            color = item[self.k("Color Name")].lower()
             similar_variants = len([v for v in product.variants if str(v.attributes[color_option]).lower() == color])
             if len(product.variants) + of_color - similar_variants >= 100:
-                for x in range(len(self._current_products[item["Style"]])):
-                    if product.id == self._current_products[item["Style"]][x].id:
-                        self._current_products[item["Style"]][x] = product
+                for x in range(len(self._current_products[item[self.k("Style")]])):
+                    if product.id == self._current_products[item[self.k("Style")]][x].id:
+                        self._current_products[item[self.k("Style")]][x] = product
                         break
 
                 size_option = 'option1'
                 color_option = 'option2'
-                product = self.new_product(item["Mill Name"], item["Style"], unidecode(item["Short Description"]),
-                                           item["Full Feature Description"], item["Category"],
-                                           len(self._current_products[item["Style"]]))
+                product = self.new_product(item[self.k("Mill Name")], item[self.k("Style")],
+                                           self.get_description_short(item), item[self.k("Full Feature Description")],
+                                           item[self.k("Category")], len(self._current_products[item[self.k("Style")]]))
 
-            if self._prices is None:
-                self._prices = pd.read_csv(os.path.join('files', self._price_file), delimiter='^', engine='python')
+            price = self.get_price(item)
 
-            price = self._prices.loc[self._prices["Item Number "] == item["Item Number"]]
-            if not price.empty:
-                price = price["Piece"].values[0]
-                try:
-                    int(price)
-                except ValueError:
-                    price = 0
-            else:
-                price = 0
-            variant = shopify.Variant({color_option: item["Color Name"].title(), size_option: item["Size"],
-                                       'product_id': product.id})
-            self._images[item["Front of Image Name"]] = {
+            variant = shopify.Variant({color_option: item[self.k("Color Name")].title(),
+                                       size_option: item[self.k("Size")], 'product_id': product.id})
+            self._images[item[self.k("Front of Image Name")]] = {
                 "product_id": product.id
             }
             if price != 0 and price != "":
@@ -405,18 +401,16 @@ class API:
             product.variants.append(variant)
 
             found = False
-            for x in range(len(self._current_products[item["Style"]])):
-                if product.id == self._current_products[item["Style"]][x].id:
-                    self._current_products[item["Style"]][x] = product
+            for x in range(len(self._current_products[item[self.k("Style")]])):
+                if product.id == self._current_products[item[self.k("Style")]][x].id:
+                    self._current_products[item[self.k("Style")]][x] = product
                     found = True
                     break
             if not found:
-                self._current_products[item["Style"]].append(product)
+                self._current_products[item[self.k("Style")]].append(product)
 
     def start_save_processes(self):
         """Create Processes that will save all the changes."""
-        global manager
-
         self.debug("Setting metafields.")
         total = len(self._current_products.keys())
         progress = []
@@ -474,14 +468,14 @@ class API:
         ns.progress = []
         ns.shopify_ids = self._shopify_ids
         shopify_ids = manager.dict()
-        ns.skip_existing = bool(os.environ['SKIP_EXISTING'] == "True")
+        ns.skip_existing = self._skip_existing
         ns.inventory = self._inventory
         index = Value("i", 0)
         total = len(ns.products)
 
         r = int(os.environ["NUM_THREADS"]) if int(os.environ["NUM_THREADS"]) < total else total
         for i in range(r):
-            p = Process(target=self.save_new_products, args=(ns, index, shopify_ids, total,))
+            p = Process(target=self.save_new_products, args=(ns, index, shopify_ids, total, self._sanmar))
             p.daemon = True
             p.start()
             processes.append(p)
@@ -493,22 +487,26 @@ class API:
                 self._save = False
 
         for key, item in shopify_ids.items():
-            self._shopify_ids[key] = item
-            self._product_ids.setdefault(str(item["product_id"]), {})[str(item["variant_id"])] = key
+            self._shopify_ids[str(key)] = item
+            self._product_ids.setdefault(str(item["product_id"]), {})[str(item["variant_id"])] = str(key)
 
     @staticmethod
-    def save_new_products(ns, index, shopify_ids, total):
+    def save_new_products(ns, index, shopify_ids, total, sanmar):
         """Loop through self._current_products and save the last in each list"""
         import shopify
         import shopify_limits
 
-        def find_image(filename, product_id):
+        def find_image(filename, product_id, sanmar):
             """Check if image in self._images otherwise download and create it."""
             if isinstance(filename, str):
                 hires = filename.split(".")
                 hires[-2] = ''.join([hires[-2][:-1], 'z'])
                 hires = ".".join(hires)
-                url = "https://www.alphabroder.com/media/hires/{}".format(hires)
+                url = "https://www.alphabroder.com/media/hires/{}".format(hires) if not sanmar else filename
+
+                if sanmar:
+                    a = urlparse(filename)
+                    hires = os.path.basename(a.path)
 
                 file_location = os.path.join('images', hires)
 
@@ -539,9 +537,9 @@ class API:
             else:
                 return None
 
-        shop_url = "https://{}:{}@{}.myshopify.com/admin".format(os.environ["SHOPIFY_API_KEY"],
-                                                                 os.environ["SHOPIFY_PASSWORD"],
-                                                                 os.environ["SHOPIFY_STORE"])
+        shop_url = "https://{}:{}@{}.myshopify.com/admin/api/2020-07".format(os.environ["SHOPIFY_API_KEY"],
+                                                                             os.environ["SHOPIFY_PASSWORD"],
+                                                                             os.environ["SHOPIFY_STORE"])
         shopify.ShopifyResource.set_site(shop_url)
 
         current = 0
@@ -589,22 +587,26 @@ class API:
 
                 images = {}
                 for variant in product.variants:
+                    color_name = str(variant.attributes[color_option]).upper()
+                    if sanmar:
+                        color_name = str(variant.attributes[color_option]).title()
+
                     row = ns.inventory.loc[
-                        (ns.inventory["Style"] == style)
-                        & (ns.inventory["Color Name"] == str(variant.attributes[color_option]).upper())
-                        & (ns.inventory["Size"] == variant.attributes[size_option])
+                        (ns.inventory[k("Style", sanmar)] == style)
+                        & (ns.inventory[k("Color Name", sanmar)] == color_name)
+                        & (ns.inventory[k("Size", sanmar)] == variant.attributes[size_option])
                         ]
-                    if not row.empty and row["Item Number"].values[0] not in ns.shopify_ids:
-                        fn = row["Front of Image Name"].values[0]
+                    if not row.empty and row[k("Item Number", sanmar)].values[0] not in ns.shopify_ids:
+                        fn = row[k("Front of Image Name", sanmar)].values[0]
                         image = images.get(fn, None)
                         if not image:
-                            image = find_image(fn, product.id)
+                            image = find_image(fn, product.id, sanmar)
                             images[fn] = image
                         if image:
                             variant.image_id = image.id
                             try:
                                 variant.save()
-                                shopify_ids[row["Item Number"].values[0]] = {
+                                shopify_ids[row[k("Item Number", sanmar)].values[0]] = {
                                     "variant_id": variant.id,
                                     "product_id": product.id
                                 }
@@ -616,7 +618,7 @@ class API:
                                 sleep(300)
                                 try:
                                     variant.save()
-                                    shopify_ids[row["Item Number"].values[0]] = {
+                                    shopify_ids[row[k("Item Number", sanmar)].values[0]] = {
                                         "variant_id": variant.id,
                                         "product_id": product.id
                                     }
@@ -626,9 +628,8 @@ class API:
                                     pass
                                 except Error:
                                     sleep(300)
-                                    e = "Could not save {}".format(row["Item Number"].values[0])
+                                    e = "Could not save {}".format(row[k("Item Number", sanmar)].values[0])
                                     print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), e))
-
             p = int(100 * current / total)
             if p not in ns.progress:
                 print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), p))
@@ -637,7 +638,9 @@ class API:
     def new_product(self, mill_name, style, short_description, full_description, category, color_index):
         """Create a new Shopify product with the given data."""
         new_product = shopify.Product()
-        title = "{} {}: {}".format(mill_name, style, short_description)
+        title = short_description
+        if not self._sanmar:
+            title = "{} {}: {}".format(mill_name, style, short_description)
         if color_index > 0:
             color = ""
             if color_index >= len(self._color_groups):
@@ -646,30 +649,105 @@ class API:
                 color = self._color_groups[color_index]
             title = "{}, {}".format(title, color)
         new_product.title = title
+        desc_split = full_description.split("|") if self._sanmar else full_description.split(";")
         new_product.body_html = "<ul><li>{}</li></ul>".format("</li><li>".join(
-            [li.strip() for li in full_description.split(";")]))
+            [li.strip() for li in desc_split]))
         new_product.vendor = mill_name
         new_product.product_type = category
         new_product.save()
         new_product.variants = []
         return new_product
 
+    def _load_product_file(self, inventory_store, limit):
+        """Load in product files"""
+        pf = self._product_file_sanmar if self._sanmar else self._product_file
+        delimiter = ',' if self._sanmar else '^'
+        self._inventory = pd.read_csv(os.path.join('files', pf), delimiter=delimiter, engine='python')
+        self._inventory = self._inventory.loc[self._inventory[self.k('Category')].isin(self._categories)
+                                              & ~self._inventory[self.k('Mill Name')].str.contains('Drop Ship',
+                                                                                                   flags=re.IGNORECASE,
+                                                                                                   regex=True)]
+
+        if self._skip_existing:
+            self._inventory = self._inventory.loc[~self._inventory[self.k('Item Number')].isin(inventory_store.keys())]
+        if os.environ.get('ONLY_THESE') is not None:
+            these = os.environ['ONLY_THESE'].split(",")
+            self._inventory = self._inventory.loc[self._inventory[self.k('Style')].isin(these)]
+        self._inventory = self._inventory.replace({self.k("Mill Name"): {'Bella + Canvas': 'Bella+Canvas'}})
+
+        self._inventory.sort_values(self.k('Style'))
+
+        self.debug(f"Found: {self._inventory.shape[0]}")
+        if limit > 0:
+            self._inventory = self._inventory.head(limit)
+        self.debug(f"Importing: {self._inventory.shape[0]}")
+
+    def get_description_short(self, item):
+        """Get item short description."""
+        if self._sanmar:
+            return unescape(item["PRODUCT_TITLE"])
+        else:
+            return unidecode(item["Short Description"])
+
+    def get_price(self, item):
+        """Get item price."""
+        if self._sanmar:
+            return float(item['PIECE_PRICE'])
+        else:
+            if self._prices is None:
+                self._prices = pd.read_csv(os.path.join('files', self._price_file), delimiter='^', engine='python')
+
+            price = self._prices.loc[self._prices["Item Number "] == item["Item Number"]]
+            if not price.empty:
+                price = price["Piece"].values[0]
+                try:
+                    int(price)
+                except ValueError:
+                    price = 0
+            else:
+                price = 0
+            return price
+
+    def k(self, key):
+        """Get key relative to sanmar or alpha product csvs."""
+        return k(key, self._sanmar)
+
     def prepare_products(self):
         """Prepare for updating products by downloading relevant files."""
-        self.download(self._product_file)
-        self.download(self._price_file)
+        if self._sanmar:
+            self.download_sanmar(self._product_file_sanmar)
+        else:
+            self.download_alpha(self._product_file)
+            self.download_alpha(self._price_file)
 
     def prepare_inventory(self):
         """Prepare for updating product inventory by downloading relevant files."""
-        self.download(self._inventory_file)
+        self.download_alpha(self._inventory_file)
+        self.download_sanmar(self._product_file_sanmar)
 
-    def download(self, filename):
+    def download_alpha(self, filename):
         """Download the given file."""
-        ftp = FTP_TLS(os.environ["FTP_DOMAIN"])
-        ftp.login(user=os.environ["FTP_USERNAME"], passwd=os.environ["FTP_PASSWORD"])
+        domain = os.environ["FTP_DOMAIN_ALPHA"]
+        user = os.environ["FTP_USERNAME_ALPHA"]
+        passwd = os.environ["FTP_PASSWORD_ALPHA"]
+
+        ftp = FTP_TLS(domain)
+        ftp.login(user=user, passwd=passwd)
 
         self.download_file(ftp, filename)
-        self.download_file(ftp, filename)
+
+        ftp.quit()
+
+    def download_sanmar(self, filename):
+        """Download the given file."""
+        domain = os.environ["FTP_DOMAIN_SANMAR"]
+        user = os.environ["FTP_USERNAME_SANMAR"]
+        passwd = os.environ["FTP_PASSWORD_SANMAR"]
+
+        ftp = FTP(domain)
+        ftp.login(user=user, passwd=passwd)
+
+        self.download_file(ftp, filename, dir='SanMarPDD/')
 
         ftp.quit()
 
@@ -696,14 +774,9 @@ class API:
                 print(e)
 
         if self._download:
-            if os.path.isfile(os.path.join('files', self._inventory_file)):
-                os.unlink(os.path.join('files', self._inventory_file))
-
-            if os.path.isfile(os.path.join('files', self._product_file)):
-                os.unlink(os.path.join('files', self._product_file))
-
-            if os.path.isfile(os.path.join('files', self._price_file)):
-                os.unlink(os.path.join('files', self._price_file))
+            for f in [self._inventory_file, self._product_file, self._price_file, self._product_file_sanmar]:
+                if os.path.isfile(os.path.join('files', f)):
+                    os.unlink(os.path.join('files', f))
 
     @staticmethod
     def init_mongodb():
@@ -711,14 +784,24 @@ class API:
         client = pymongo.MongoClient(os.environ["MONGODB_URL"])
         return client.bulkthreads
 
-    def download_file(self, ftp, filename):
+    @staticmethod
+    def _sanitize_records(records):
+        """Return records without the default mongodb _id to avoid conflicts on save"""
+        try:
+            records = [item for item in records][0]
+        except IndexError:
+            records = []
+        records = {key: records[key] for key in records if key != '_id'}
+        return records
+
+    def download_file(self, ftp, filename, dir=''):
         """Download given file from global FTP server."""
 
         download_to = os.path.join('files', filename)
         self.debug("Downloading '{}' to: {}".format(filename, download_to))
 
         local_file = open(download_to, 'wb')
-        ftp.retrbinary('RETR ' + filename, local_file.write)
+        ftp.retrbinary(f'RETR {dir}{filename}', local_file.write)
         local_file.close()
 
     def debug(self, msg):
@@ -731,3 +814,21 @@ class API:
         """Yield successive n-sized chunks from l."""
         for i in range(0, len(l), n):
             yield l[i:i + n]
+
+
+def k(key, sanmar):
+    """Get key relative to sanmar or alpha product csvs."""
+    if sanmar:
+        return {
+            'Category': 'CATEGORY_NAME',
+            'Mill Name': 'MILL',
+            'Item Number': 'UNIQUE_KEY',
+            'Style': 'STYLE#',
+            'Color Name': 'COLOR_NAME',
+            'Front of Image Name': 'FRONT_MODEL_IMAGE_URL',
+            'Size': 'SIZE',
+            'Full Feature Description': 'PRODUCT_DESCRIPTION',
+            'Total Inventory': 'QTY'
+        }[key]
+    else:
+        return key
