@@ -2,6 +2,7 @@
 import os
 import re
 import sys
+import json
 import pymongo
 import shopify
 from ftplib import FTP_TLS, FTP
@@ -106,6 +107,7 @@ class API:
                                                                              os.environ["SHOPIFY_PASSWORD"],
                                                                              os.environ["SHOPIFY_STORE"])
         shopify.ShopifyResource.set_site(shop_url)
+        shopify.ShopifyResource.headers.update({'X-Shopify-Access-Token': shopify.ShopifyResource.password})
 
         if not self._db:
             self._db = self.init_mongodb()
@@ -113,68 +115,78 @@ class API:
         self._product_ids = self._sanitize_records(self._db.products.find())
 
         # Parse Inventory File
-        self.debug("Parsing Inventory File")
+        self.debug("Parsing Inventory Files")
         df_alpha = pd.read_csv(os.path.join('files', self._inventory_file), delimiter=',', engine='python')
         df_sanmar = pd.read_csv(os.path.join('files', self._product_file_sanmar), delimiter=',', engine='python')
 
         z = 0
-        next_url = None
+        cursor = None
+        client = shopify.GraphQL()
+        inventory_item_adjustments = []
+
         while True:
             self.debug("Getting page {}".format(z))
 
-            products = []
-            if os.environ.get('ONLY_THESE') is not None:
-                for pid in os.environ['ONLY_THESE'].split(','):
-                    product = shopify.Product.find(pid)
-                    if product:
-                        products.append(product)
-            else:
-                products = shopify.Product.find(from_=next_url)
-                if products.has_next_page():
-                    next_url = products.next_page_url
-                else:
-                    next_url = None
+            after = f', after: "{cursor}"' if cursor else ''
+            query = f'''
+            {{
+              productVariants(first: 250{after}) {{
+                edges {{
+                  cursor
+                  node {{
+                    id
+                    legacyResourceId
+                    product {{
+                      id
+                      legacyResourceId
+                    }}
+                    inventoryQuantity
+                    inventoryItem {{
+                      id
+                    }}
+                  }}
+                }}
+              }}
+            }}
+            '''
+
+            cursor = None
+            data = self.execute_graphql(client, query)
+            for pv in data['data']['productVariants']['edges']:
+                node = pv['node']
+                cursor = pv['cursor']
+                pid = node['product']['legacyResourceId']
+                vid = node['legacyResourceId']
+                quantity = node['inventoryQuantity']
+                ii_id = node['inventoryItem']['id']
+
+                if pid in self._product_ids and vid in self._product_ids[pid]:
+                    item = self._product_ids[pid][vid]
+
+                    sanmar = False
+                    row = df_alpha.loc[df_alpha['Item Number'].isin([item])]
+                    if row.empty:
+                        sanmar = True
+                        row = df_sanmar.loc[df_sanmar[k('Item Number', True)].isin([item])]
+
+                    if not row.empty:
+                        total = int(row[k("Total Inventory", sanmar)].values[0])
+                        total_drop_ship = 0 if sanmar else int(row["DROP SHIP"].values[0])
+                        total -= total_drop_ship
+
+                        availableDelta = total - quantity
+                        iia = f'{{inventoryItemId: "{ii_id}", availableDelta: {availableDelta}}}'
+                        inventory_item_adjustments.append(iia)
+                        if len(inventory_item_adjustments) == 100:
+                            self.update_inventory_items(client, inventory_item_adjustments)
+                            inventory_item_adjustments = []
 
             z += 1
-            if not products:
+
+            if cursor is None:
                 break
 
-            for i in range(len(products)):
-                for j in range(len(products[i].variants)):
-                    pid = str(products[i].id)
-                    vid = str(products[i].variants[j].id)
-                    if pid in self._product_ids and vid in self._product_ids[pid]:
-                        item = self._product_ids[pid][vid]
-
-                        sanmar = False
-                        row = df_alpha.loc[df_alpha['Item Number'].isin([item])]
-                        if row.empty:
-                            sanmar = True
-                            row = df_sanmar.loc[df_sanmar[k('Item Number', True)].isin([item])]
-
-                        if not row.empty:
-                            total = int(row[k("Total Inventory", sanmar)].values[0])
-                            total_drop_ship = 0 if sanmar else int(row["DROP SHIP"].values[0])
-                            total -= total_drop_ship
-
-                            iid = products[i].variants[j].inventory_item_id
-                            shopify.InventoryLevel.set(os.environ["SHOPIFY_LOCATION"], iid, max(0, total))
-
-            # processes = []
-            # c = max(int(len(products) / int(os.environ["NUM_THREADS"])), 1)
-            # chunks = list(self.chunks(products, c))
-            # for ps in chunks:
-            #     p = Process(target=self.save_thread, args=(ps, bool(ps == chunks[-1],)))
-            #     p.daemon = True
-            #     p.start()
-            #     processes.append(p)
-            #
-            # for p in processes:
-            #     p.join()
-
-            if next_url is None:
-                break
-
+        self.update_inventory_items(client, inventory_item_adjustments)
         # TODO: set to 0 products that weren't found
         self._clean()
 
@@ -313,12 +325,6 @@ class API:
             size_option = ""
             size = item[self.k("Size")].lower()
 
-            # for option in p.options:
-            #     if color in [o.lower() for o in option.values]:
-            #         color_option = 'option{}'.format(option.position)
-            #     elif size in [o.lower() for o in option.values]:
-            #         size_option = 'option{}'.format(option.position)
-
             if len(p.options) >= 2:
                 for option in p.options:
                     if option.name == 'Color':
@@ -326,19 +332,9 @@ class API:
                     if option.name == 'Size':
                         size_option = 'option{}'.format(option.position)
 
-            self.debug('******************************')
-            self.debug(color_option)
-            self.debug(size_option)
-            self.debug(color)
-            self.debug(size)
-            self.debug('----------------')
             if color_option and size_option:
                 variant = None
                 for v in p.variants:
-                    self.debug(v.attributes[color_option].lower())
-                    self.debug(v.attributes[color_option].lower() == color)
-                    self.debug(v.attributes[size_option].lower())
-                    self.debug(v.attributes[size_option].lower() == size)
                     if v.attributes[color_option].lower() == color \
                             and v.attributes[size_option].lower() == size:
                         variant = v
@@ -351,7 +347,6 @@ class API:
                     self._product_ids.setdefault(str(p.id), {})[str(variant.id)] = str(item[self.k("Item Number")])
                     skip = True
                     break
-            self.debug('******************************')
         product = None
         for p in self._current_products[item[self.k("Style")]]:
             if len(p.variants) + of_color - similar_variants < 100:
@@ -489,6 +484,48 @@ class API:
         for key, item in shopify_ids.items():
             self._shopify_ids[str(key)] = item
             self._product_ids.setdefault(str(item["product_id"]), {})[str(item["variant_id"])] = str(key)
+
+    def update_inventory_items(self, client, inventory_item_adjustments):
+        """Bulk updates."""
+
+        nl = '\n'
+        query = f'''
+          mutation {{
+              inventoryBulkAdjustQuantityAtLocation(
+                locationId: "gid://shopify/Location/{os.environ['SHOPIFY_LOCATION']}",
+                inventoryItemAdjustments: [
+                  {f',{nl}'.join(inventory_item_adjustments)}
+                  ]) {{
+
+                inventoryLevels {{
+                  available
+                }}
+              }}
+            }}
+        '''
+
+        self.execute_graphql(client, query)
+
+    def execute_graphql(self, client, query):
+        """Execute graphql query and wait if necessary."""
+        result = client.execute(query)
+        result = json.loads(result)
+
+        # {'errors': [{'message': 'Throttled', 'extensions': {'code': 'THROTTLED',
+        #                                                     'documentation': 'https://help.shopify.com/api/graphql-admin-api/graphql-admin-api-rate-limits'}}],
+        #  'extensions': {'cost': {'requestedQueryCost': 752, 'actualQueryCost': None,
+        #                          'throttleStatus': {'maximumAvailable': 1000.0, 'currentlyAvailable': 744,
+        #                                             'restoreRate': 50.0}}}}
+
+        if 'errors' in result:
+            cost = result['extensions']['cost']
+            sleep_for = (cost['requestedQueryCost'] + 10 - cost['throttleStatus']['currentlyAvailable'])
+            sleep_for /= cost['throttleStatus']['restoreRate']
+            sleep(sleep_for)
+
+            return self.execute_graphql(client, query)
+        else:
+            return result
 
     @staticmethod
     def save_new_products(ns, index, shopify_ids, total, sanmar):

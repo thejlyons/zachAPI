@@ -5,6 +5,7 @@ import pyactiveresource.connection
 from shopify.base import ShopifyConnection
 import sys
 
+
 def patch_shopify_with_limits():
     """Add limits"""
     func = ShopifyConnection._open
