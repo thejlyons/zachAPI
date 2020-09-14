@@ -162,20 +162,27 @@ class API:
 
                 if pid in self._product_ids and vid in self._product_ids[pid]:
                     item = self._product_ids[pid][vid]
+                    alpha_item = item.get('alpha', None) if isinstance(item, dict) else item
+                    sanmar_item = item.get('sanmar', None) if isinstance(item, dict) else item
 
-                    sanmar = False
-                    row = df_alpha.loc[df_alpha['Item Number'].isin([item])]
-                    if row.empty:
-                        sanmar = True
-                        row = df_sanmar.loc[df_sanmar[k('Item Number', True)].isin([item])]
+                    found = False
+                    total = 0
+                    if alpha_item:
+                        alpha_row = df_alpha.loc[df_alpha['Item Number'].isin([alpha_item])]
+                        if not alpha_row.empty:
+                            found = True
+                            total += int(alpha_row[k("Total Inventory", False)].values[0])
+                            total -= int(alpha_row["DROP SHIP"].values[0])
 
-                    if not row.empty:
-                        total = int(row[k("Total Inventory", sanmar)].values[0])
-                        total_drop_ship = 0 if sanmar else int(row["DROP SHIP"].values[0])
-                        total -= total_drop_ship
+                    if sanmar_item:
+                        sanmar_row = df_sanmar.loc[df_sanmar[k('Item Number', True)].isin([sanmar_item])]
+                        if not sanmar_row.empty:
+                            found = True
+                            total += int(sanmar_row[k("Total Inventory", True)].values[0])
 
-                        availableDelta = total - quantity
-                        iia = f'{{inventoryItemId: "{ii_id}", availableDelta: {availableDelta}}}'
+                    if found:
+                        available_delta = total - quantity
+                        iia = f'{{inventoryItemId: "{ii_id}", availableDelta: {available_delta}}}'
                         inventory_item_adjustments.append(iia)
                         if len(inventory_item_adjustments) == 100:
                             self.update_inventory_items(client, inventory_item_adjustments)
@@ -344,7 +351,9 @@ class API:
                         "variant_id": variant.id,
                         "product_id": p.id
                     }
-                    self._product_ids.setdefault(str(p.id), {})[str(variant.id)] = str(item[self.k("Item Number")])
+                    key = 'sanmar' if self._sanmar else 'alpha'
+                    inum = str(item[self.k("Item Number")])
+                    self._product_ids.setdefault(str(p.id), {}).setdefault(str(variant.id), {})[key] = inum
                     skip = True
                     break
         product = None
@@ -481,9 +490,11 @@ class API:
             if p.exitcode > 0:
                 self._save = False
 
+        sa = 'sanmar' if self._sanmar else 'alpha'
         for key, item in shopify_ids.items():
-            self._shopify_ids[str(key)] = item
-            self._product_ids.setdefault(str(item["product_id"]), {})[str(item["variant_id"])] = str(key)
+            key = str(key)
+            self._shopify_ids[key] = item
+            self._product_ids.setdefault(str(item["product_id"]), {}).setdefault(str(item["product_id"]), {})[sa] = key
 
     def update_inventory_items(self, client, inventory_item_adjustments):
         """Bulk updates."""
