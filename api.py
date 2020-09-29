@@ -191,8 +191,8 @@ class API:
                         if len(inventory_item_adjustments) == 100:
                             self.update_inventory_items(client, inventory_item_adjustments)
                             inventory_item_adjustments = []
-                else:
-                    self.debug(f"https://bulkthreads.myshopify.com/admin/products/{pid}/variants/{vid}")
+                # else:
+                #     self.debug(f"https://bulkthreads.myshopify.com/admin/products/{pid}/variants/{vid}")
 
             z += 1
 
