@@ -116,8 +116,10 @@ class API:
 
         # Parse Inventory File
         self.debug("Parsing Inventory Files")
-        df_alpha = pd.read_csv(os.path.join('files', self._inventory_file), delimiter=',', engine='python')
-        df_sanmar = pd.read_csv(os.path.join('files', self._product_file_sanmar), delimiter=',', engine='python')
+        df_alpha = pd.read_csv(os.path.join('files', self._inventory_file), delimiter=',', engine='python',
+                               dtype="string")
+        df_sanmar = pd.read_csv(os.path.join('files', self._product_file_sanmar), delimiter=',', engine='python',
+                                dtype="string")
 
         z = 0
         cursor = None
@@ -128,16 +130,18 @@ class API:
             self.debug("Getting page {}".format(z))
 
             after = f', after: "{cursor}"' if cursor else ''
+            style = ''
+            if os.environ.get('ONLY_THESE') is not None:
+                style = " OR ".join(os.environ['ONLY_THESE'].split(","))
+                style = f', query: "{style}"'
             query = f'''
             {{
-              productVariants(first: 250{after}) {{
+              productVariants(first: 250{after}{style}) {{
                 edges {{
                   cursor
                   node {{
-                    id
                     legacyResourceId
                     product {{
-                      id
                       legacyResourceId
                     }}
                     inventoryQuantity
@@ -187,6 +191,8 @@ class API:
                         if len(inventory_item_adjustments) == 100:
                             self.update_inventory_items(client, inventory_item_adjustments)
                             inventory_item_adjustments = []
+                else:
+                    self.debug(f"https://bulkthreads.myshopify.com/admin/products/{pid}/variants/{vid}")
 
             z += 1
 
@@ -278,9 +284,8 @@ class API:
                 products = []
                 for product in all_products:
                     if item[self.k("Style")] in product.title:
-                        style = product.title.split(':')
-                        style = style[0].split(" ")[-1]
-                        if item[self.k("Style")] == style:
+                        style = product.title.replace(',', '').split(' ')
+                        if item[self.k("Style")] in style:
                             if len(product.options) > 0 and product.options[0].name == 'Color':
                                 for x in range(len(product.variants)):
                                     product.variants[x].option2, product.variants[x].option1 = (
@@ -288,7 +293,7 @@ class API:
                                     )
                                 product.options.reverse()
                                 product.save()
-                                print("----{} needs checked.----".format(item[self.k("Style")]))
+                                # print("----{} needs checked.----".format(item[self.k("Style")]))
                                 self._styles_to_fix.append(item[self.k("Style")])
                             if len(product.variants) == 1 and product.variants[0].title == 'Default Title':
                                 product.variants = []
@@ -299,7 +304,7 @@ class API:
                                            ].shape[0]
             self.process_item(item, of_color)
             p = int(100 * i / total)
-            if p not in progress:
+            if p % 10 == 0 and p not in progress:
                 self.debug("{}%".format(p))
                 progress.append(p)
         self.debug("100%\n")
@@ -327,6 +332,10 @@ class API:
 
         similar_variants = 0
         for p in self._current_products[item[self.k("Style")]]:
+            # if p.product_type != item[self.k("Category")]:
+            #     skip = True
+            #     continue
+            # skip = False
             color_option = ""
             color = item[self.k("Color Name")].lower()
             size_option = ""
@@ -338,6 +347,9 @@ class API:
                         color_option = 'option{}'.format(option.position)
                     if option.name == 'Size':
                         size_option = 'option{}'.format(option.position)
+            else:
+                size_option = 'option1'
+                color_option = 'option2'
 
             if color_option and size_option:
                 variant = None
@@ -347,14 +359,20 @@ class API:
                         variant = v
                         break
                 if variant:
-                    self._shopify_ids[str(item[self.k("Item Number")])] = {
-                        "variant_id": variant.id,
-                        "product_id": p.id
-                    }
-                    key = 'sanmar' if self._sanmar else 'alpha'
-                    inum = str(item[self.k("Item Number")])
-                    self._product_ids.setdefault(str(p.id), {}).setdefault(str(variant.id), {})[key] = inum
                     skip = True
+                    if variant.id:
+                        if self._sanmar:
+                            price = self.get_price(item)
+                            if price != 0 and price != "":
+                                variant.price = price
+
+                        self._shopify_ids[str(item[self.k("Item Number")])] = {
+                            "variant_id": variant.id,
+                            "product_id": p.id
+                        }
+                        key = 'sanmar' if self._sanmar else 'alpha'
+                        inum = str(item[self.k("Item Number")])
+                        self._product_ids.setdefault(str(p.id), {}).setdefault(str(variant.id), {})[key] = inum
                     break
         product = None
         for p in self._current_products[item[self.k("Style")]]:
@@ -517,10 +535,18 @@ class API:
 
         self.execute_graphql(client, query)
 
-    def execute_graphql(self, client, query):
+    def execute_graphql(self, client, query, retries=0):
         """Execute graphql query and wait if necessary."""
-        result = client.execute(query)
-        result = json.loads(result)
+        if retries > 4:
+            self.debug('Could not complete call. Max retries met.', True)
+        try:
+            result = client.execute(query)
+            result = json.loads(result)
+        except urllib.error.HTTPError as e:
+            self.debug('Caught: Internal Server Error. Retrying in 1 minute.', True)
+            sleep(60)
+            retries += 1
+            self.execute_graphql(client, query, retries)
 
         # {'errors': [{'message': 'Throttled', 'extensions': {'code': 'THROTTLED',
         #                                                     'documentation': 'https://help.shopify.com/api/graphql-admin-api/graphql-admin-api-rate-limits'}}],
@@ -710,7 +736,7 @@ class API:
         """Load in product files"""
         pf = self._product_file_sanmar if self._sanmar else self._product_file
         delimiter = ',' if self._sanmar else '^'
-        self._inventory = pd.read_csv(os.path.join('files', pf), delimiter=delimiter, engine='python')
+        self._inventory = pd.read_csv(os.path.join('files', pf), delimiter=delimiter, engine='python', dtype="string")
         self._inventory = self._inventory.loc[self._inventory[self.k('Category')].isin(self._categories)
                                               & ~self._inventory[self.k('Mill Name')].str.contains('Drop Ship',
                                                                                                    flags=re.IGNORECASE,
@@ -721,6 +747,11 @@ class API:
         if os.environ.get('ONLY_THESE') is not None:
             these = os.environ['ONLY_THESE'].split(",")
             self._inventory = self._inventory.loc[self._inventory[self.k('Style')].isin(these)]
+
+        if self._sanmar and os.environ.get('BRANDS_SANMAR') is not None:
+            brands = os.environ.get('BRANDS_SANMAR').split(',')
+            self._inventory = self._inventory.loc[self._inventory[self.k('Mill Name')].isin(brands)]
+
         self._inventory = self._inventory.replace({self.k("Mill Name"): {'Bella + Canvas': 'Bella+Canvas'}})
 
         self._inventory.sort_values(self.k('Style'))
@@ -743,7 +774,8 @@ class API:
             return float(item['PIECE_PRICE'])
         else:
             if self._prices is None:
-                self._prices = pd.read_csv(os.path.join('files', self._price_file), delimiter='^', engine='python')
+                self._prices = pd.read_csv(os.path.join('files', self._price_file), delimiter='^', engine='python',
+                                           dtype="string")
 
             price = self._prices.loc[self._prices["Item Number "] == item["Item Number"]]
             if not price.empty:
@@ -822,6 +854,7 @@ class API:
                 print(e)
 
         if self._download:
+            return
             for f in [self._inventory_file, self._product_file, self._price_file, self._product_file_sanmar]:
                 if os.path.isfile(os.path.join('files', f)):
                     os.unlink(os.path.join('files', f))
@@ -852,9 +885,9 @@ class API:
         ftp.retrbinary(f'RETR {dir}{filename}', local_file.write)
         local_file.close()
 
-    def debug(self, msg):
+    def debug(self, msg, force=False):
         """Method for printing debug messages."""
-        if self._debug:
+        if self._debug or force:
             print("<{}>: {}".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg))
 
     @staticmethod

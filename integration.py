@@ -15,10 +15,12 @@ load_dotenv()
 @click.option('--existing', '-e', is_flag=True, help="Include existing products and re-import them.")
 @click.option('--products', '-p', is_flag=True, help="Update products.")
 @click.option('--inventory', '-i', is_flag=True, help="Update inventory.")
-@click.option('--sanmar', '-s', is_flag=True, help="SanMar. If flag is not present, AlphaBroder settings will be used.")
+@click.option('--sanmar', '-s', is_flag=True, help="SanMar. If flag is not present, AlphaBroder settings will be used. "
+                                                   "Relevant to updating products only.")
 def main(limit, download, verbose, existing, products, inventory, sanmar):
     """Integration"""
-    # TODO: Use flags instead of .env settings for SKIP_EXISTING, ONLY_THESE
+    # TODO: Use flags instead of .env settings for ONLY_THESE
+    # 600
     print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
     files = 'files'
