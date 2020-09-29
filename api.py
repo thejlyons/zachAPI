@@ -546,7 +546,7 @@ class API:
             self.debug('Caught: Internal Server Error. Retrying in 1 minute.', True)
             sleep(60)
             retries += 1
-            self.execute_graphql(client, query, retries)
+            return self.execute_graphql(client, query, retries)
 
         # {'errors': [{'message': 'Throttled', 'extensions': {'code': 'THROTTLED',
         #                                                     'documentation': 'https://help.shopify.com/api/graphql-admin-api/graphql-admin-api-rate-limits'}}],
