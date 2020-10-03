@@ -21,7 +21,7 @@ def main(limit, download, verbose, existing, products, inventory, sanmar):
     """Integration"""
     # TODO: Use flags instead of .env settings for ONLY_THESE
     # 600
-    print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    print(f'<{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}>: Begin inventory update.')
 
     files = 'files'
     if not os.path.exists(files):
@@ -38,7 +38,7 @@ def main(limit, download, verbose, existing, products, inventory, sanmar):
     if inventory:
         api.update_inventory()
 
-    print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    print(f'<{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}>: Finished inventory update.')
 
 
 if __name__ == '__main__':

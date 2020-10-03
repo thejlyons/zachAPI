@@ -543,8 +543,8 @@ class API:
             result = client.execute(query)
             result = json.loads(result)
         except urllib.error.HTTPError as e:
-            self.debug('Caught: Internal Server Error. Retrying in 1 minute.', True)
-            sleep(60)
+            self.debug('Caught: Internal Server Error. Retrying in 3 minutes.', True)
+            sleep(180)
             retries += 1
             return self.execute_graphql(client, query, retries)
 
