@@ -9,6 +9,7 @@ load_dotenv()
 
 
 @click.command()
+@click.option('--continuous', '-c', is_flag=True, help='Run continuously. Relevant to updating inventory only.')
 @click.option('--limit', '-l', default=5, help='Limit number of imported products.')
 @click.option('--download', '-d', is_flag=True, help="Download Files.")
 @click.option('--verbose', '-v', is_flag=True, help="Verbose - Show debug statements.")
@@ -17,7 +18,7 @@ load_dotenv()
 @click.option('--inventory', '-i', is_flag=True, help="Update inventory.")
 @click.option('--sanmar', '-s', is_flag=True, help="SanMar. If flag is not present, AlphaBroder settings will be used. "
                                                    "Relevant to updating products only.")
-def main(limit, download, verbose, existing, products, inventory, sanmar):
+def main(continuous, limit, download, verbose, existing, products, inventory, sanmar):
     """Integration"""
     # TODO: Use flags instead of .env settings for ONLY_THESE
     # 600
@@ -36,7 +37,12 @@ def main(limit, download, verbose, existing, products, inventory, sanmar):
     if products:
         api.update_products(limit=limit, sanmar=sanmar, skip_existing=not existing)
     if inventory:
-        api.update_inventory()
+        if continuous:
+            while True:
+                print(f'<{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}>: Looping inventory update.')
+                api.update_inventory(True)
+        else:
+            api.update_inventory()
 
     print(f'<{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}>: Finished inventory update.')
 

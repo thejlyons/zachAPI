@@ -19,6 +19,7 @@ from html import unescape
 from ssl import SSLEOFError
 from http.client import RemoteDisconnected
 from urllib.parse import urlparse
+import traceback
 
 
 class API:
@@ -96,7 +97,7 @@ class API:
         self._styles_to_fix = []
         self._categories = os.environ['CATEGORIES'].split(",")
 
-    def update_inventory(self):
+    def update_inventory(self, alpha_only=False):
         """Update all product inventory values."""
         if self._download:
             self.debug("Downloading files.")
@@ -118,8 +119,10 @@ class API:
         self.debug("Parsing Inventory Files")
         df_alpha = pd.read_csv(os.path.join('files', self._inventory_file), delimiter=',', engine='python',
                                dtype="string")
-        df_sanmar = pd.read_csv(os.path.join('files', self._product_file_sanmar), delimiter=',', engine='python',
-                                dtype="string")
+        df_sanmar = None
+        if not alpha_only:
+            df_sanmar = pd.read_csv(os.path.join('files', self._product_file_sanmar), delimiter=',', engine='python',
+                                    dtype="string")
 
         z = 0
         cursor = None
@@ -178,7 +181,7 @@ class API:
                             total += int(alpha_row[k("Total Inventory", False)].values[0])
                             total -= int(alpha_row["DROP SHIP"].values[0])
 
-                    if sanmar_item:
+                    if sanmar_item and not alpha_only:
                         sanmar_row = df_sanmar.loc[df_sanmar[k('Item Number', True)].isin([sanmar_item])]
                         if not sanmar_row.empty:
                             found = True
@@ -216,24 +219,7 @@ class API:
         total = len(products)
         progress = []
         for i, product in enumerate(products):
-            try:
-                product.save()
-            except HTTPError:
-                pass
-            except ResourceNotFound:
-                pass
-            except (BadRequest, ValueError):
-                sleep(40)
-                try:
-                    product.save()
-                except HTTPError:
-                    pass
-                except ResourceNotFound:
-                    pass
-                except (BadRequest, ValueError):
-                    sleep(40)
-                    s = "Coudn't save {}".format(product.id)
-                    print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), s))
+            save(product, 40)
 
             p = int(100 * i / total)
             if is_last and p % 5 == 0 and p not in progress:
@@ -337,9 +323,9 @@ class API:
             #     continue
             # skip = False
             color_option = ""
-            color = item[self.k("Color Name")].lower()
+            color = item[self.k("Color Name")].lower().strip()
             size_option = ""
-            size = item[self.k("Size")].lower()
+            size = item[self.k("Size")].lower().strip()
 
             if len(p.options) >= 2:
                 for option in p.options:
@@ -354,6 +340,10 @@ class API:
             if color_option and size_option:
                 variant = None
                 for v in p.variants:
+                    c = v.attributes[color_option].lower()
+                    cb = c == color
+                    s = v.attributes[size_option].lower()
+                    sb = s == size
                     if v.attributes[color_option].lower() == color \
                             and v.attributes[size_option].lower() == size:
                         variant = v
@@ -397,7 +387,7 @@ class API:
 
             # If total variants, plus the all of that color, mines the ones already made with the same color >= 100
             # then a new product needs created. Shopify limits 100 variants / product.
-            color = item[self.k("Color Name")].lower()
+            color = item[self.k("Color Name")].lower().strip()
             similar_variants = len([v for v in product.variants if str(v.attributes[color_option]).lower() == color])
             if len(product.variants) + of_color - similar_variants >= 100:
                 for x in range(len(self._current_products[item[self.k("Style")]])):
@@ -413,8 +403,8 @@ class API:
 
             price = self.get_price(item)
 
-            variant = shopify.Variant({color_option: item[self.k("Color Name")].title(),
-                                       size_option: item[self.k("Size")], 'product_id': product.id})
+            variant = shopify.Variant({color_option: item[self.k("Color Name")].title().strip(),
+                                       size_option: item[self.k("Size").strip()], 'product_id': product.id})
             self._images[item[self.k("Front of Image Name")]] = {
                 "product_id": product.id
             }
@@ -599,14 +589,7 @@ class API:
                     with open(file_location, 'rb') as f:
                         encoded = f.read()
                         image.attach_image(encoded, file_location)
-                        try:
-                            image.save()
-                        except RemoteDisconnected:
-                            sleep(300)
-                            try:
-                                image.save()
-                            except RemoteDisconnected:
-                                pass
+                        save(image)
                 return image
             else:
                 return None
@@ -625,7 +608,6 @@ class API:
                 break
 
             style, products = ns.products[current]
-
             for product in products:
                 color_option = ""
                 size_option = ""
@@ -637,27 +619,16 @@ class API:
                 except IndexError:
                     size_option = 'option1'
                     color_option = 'option2'
-                product.options = [{"name": "Size", "values": [v.attributes[size_option] for v in product.variants]},
-                                   {"name": "Color", "values": [v.attributes[color_option] for v in product.variants]}]
-                try:
-                    product.save()
-                except SSLEOFError:
-                    pass
-                except URLError:
-                    pass
-                except (HTTPError, Error, ValueError):
-                    sleep(30)
-                    try:
-                        product.save()
-                    except SSLEOFError:
-                        pass
-                    except URLError:
-                        pass
-                    except (HTTPError, Error, ValueError):
-                        sleep(30)
-                        e = "Could not save {}".format(product.handle)
-                        print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), e))
-                        continue
+                sizes = []
+                colors = []
+                for v in product.variants:
+                    if v.attributes[size_option] not in sizes:
+                        sizes.append(v.attributes[size_option])
+                    if v.attributes[color_option] not in colors:
+                        colors.append(v.attributes[color_option])
+                product.options = [{"name": "Size", "values": sizes}, {"name": "Color", "values": colors}]
+                if not save(product):
+                    continue
 
                 images = {}
                 for variant in product.variants:
@@ -678,32 +649,12 @@ class API:
                             images[fn] = image
                         if image:
                             variant.image_id = image.id
-                            try:
-                                variant.save()
+                            if save(variant):
                                 shopify_ids[row[k("Item Number", sanmar)].values[0]] = {
                                     "variant_id": variant.id,
                                     "product_id": product.id
                                 }
-                            except SSLEOFError:
-                                pass
-                            except URLError:
-                                pass
-                            except Error:
-                                sleep(300)
-                                try:
-                                    variant.save()
-                                    shopify_ids[row[k("Item Number", sanmar)].values[0]] = {
-                                        "variant_id": variant.id,
-                                        "product_id": product.id
-                                    }
-                                except SSLEOFError:
-                                    pass
-                                except URLError:
-                                    pass
-                                except Error:
-                                    sleep(300)
-                                    e = "Could not save {}".format(row[k("Item Number", sanmar)].values[0])
-                                    print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), e))
+
             p = int(100 * current / total)
             if p not in ns.progress:
                 print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), p))
@@ -800,10 +751,11 @@ class API:
             self.download_alpha(self._product_file)
             self.download_alpha(self._price_file)
 
-    def prepare_inventory(self):
+    def prepare_inventory(self, alpha_only):
         """Prepare for updating product inventory by downloading relevant files."""
         self.download_alpha(self._inventory_file)
-        self.download_sanmar(self._product_file_sanmar)
+        if not alpha_only:
+            self.download_sanmar(self._product_file_sanmar)
 
     def download_alpha(self, filename):
         """Download the given file."""
@@ -913,3 +865,23 @@ def k(key, sanmar):
         }[key]
     else:
         return key
+
+
+def save(obj, t=300):
+    """Save shopify object."""
+    errors = (SSLEOFError, URLError, HTTPError, RemoteDisconnected, ResourceNotFound, BadRequest, Error, ValueError)
+    try:
+        obj.save()
+    except errors:
+        sleep(t)
+        try:
+            obj.save()
+        except errors as e:
+            sleep(t)
+            print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), e))
+            print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                     traceback.format_exc()))
+            s = "Could not save {}".format(obj.__dict__)
+            print("<{}>: {}%".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), s))
+            return False
+    return True

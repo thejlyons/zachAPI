@@ -1,1 +1,1 @@
-worker: python integration.py
+worker: python integration.py -ivcd
