@@ -101,7 +101,7 @@ class API:
         """Update all product inventory values."""
         if self._download:
             self.debug("Downloading files.")
-            self.prepare_inventory()
+            self.prepare_inventory(alpha_only)
 
         self.debug("Connecting to shopify.")
         shop_url = "https://{}:{}@{}.myshopify.com/admin/api/2020-07".format(os.environ["SHOPIFY_API_KEY"],
