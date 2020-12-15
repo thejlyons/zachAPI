@@ -1,3 +1,4 @@
+beautifulsoup4==4.9.3
 certifi==2019.3.9
 chardet==3.0.4
 click==7.1.2
@@ -17,6 +18,7 @@ PyYAML==5.3.1
 requests==2.21.0
 ShopifyAPI==8.0.2
 six==1.12.0
+soupsieve==2.0.1
 twill3==0.11.2
 Unidecode==1.0.23
 urllib3==1.24.2
