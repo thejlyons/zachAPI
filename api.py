@@ -187,13 +187,15 @@ class API:
                             found = True
                             total += int(sanmar_row[k("Total Inventory", True)].values[0])
 
+                    available_delta = -quantity  # Set to 0 if inventory is no longer tracked for this item
                     if found:
-                        available_delta = total - quantity
-                        iia = f'{{inventoryItemId: "{ii_id}", availableDelta: {available_delta}}}'
-                        inventory_item_adjustments.append(iia)
-                        if len(inventory_item_adjustments) == 100:
-                            self.update_inventory_items(client, inventory_item_adjustments)
-                            inventory_item_adjustments = []
+                        available_delta = total - quantity  # Set to inventory
+
+                    iia = f'{{inventoryItemId: "{ii_id}", availableDelta: {available_delta}}}'
+                    inventory_item_adjustments.append(iia)
+                    if len(inventory_item_adjustments) == 100:
+                        self.update_inventory_items(client, inventory_item_adjustments)
+                        inventory_item_adjustments = []
                 # else:
                 #     self.debug(f"https://bulkthreads.myshopify.com/admin/products/{pid}/variants/{vid}")
 
