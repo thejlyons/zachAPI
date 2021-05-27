@@ -187,15 +187,15 @@ class API:
                             found = True
                             total += int(sanmar_row[k("Total Inventory", True)].values[0])
 
-                    available_delta = -quantity  # Set to 0 if inventory is no longer tracked for this item
+                    # available_delta = -quantity  # Set to 0 if inventory is no longer tracked for this item
                     if found:
                         available_delta = total - quantity  # Set to inventory
 
-                    iia = f'{{inventoryItemId: "{ii_id}", availableDelta: {available_delta}}}'
-                    inventory_item_adjustments.append(iia)
-                    if len(inventory_item_adjustments) == 100:
-                        self.update_inventory_items(client, inventory_item_adjustments)
-                        inventory_item_adjustments = []
+                        iia = f'{{inventoryItemId: "{ii_id}", availableDelta: {available_delta}}}'
+                        inventory_item_adjustments.append(iia)
+                        if len(inventory_item_adjustments) == 100:
+                            self.update_inventory_items(client, inventory_item_adjustments)
+                            inventory_item_adjustments = []
                 # else:
                 #     self.debug(f"https://bulkthreads.myshopify.com/admin/products/{pid}/variants/{vid}")
 
@@ -372,6 +372,7 @@ class API:
                 product = p
                 break
 
+        skip = True
         if not skip:
             if not product:
                 product = self.new_product(item[self.k("Mill Name")], item[self.k("Style")],
@@ -500,11 +501,16 @@ class API:
             if p.exitcode > 0:
                 self._save = False
 
+        self.debug("Processes completed.")
         sa = 'sanmar' if self._sanmar else 'alpha'
+        vids = []
         for key, item in shopify_ids.items():
             key = str(key)
             self._shopify_ids[key] = item
-            self._product_ids.setdefault(str(item["product_id"]), {}).setdefault(str(item["product_id"]), {})[sa] = key
+            self._product_ids.setdefault(str(item["product_id"]), {}).setdefault(str(item["variant_id"]), {})[sa] = key
+            vids.append(str(item["variant_id"]))
+        print(vids)
+        print(",".join(vids))
 
     def update_inventory_items(self, client, inventory_item_adjustments):
         """Bulk updates."""
@@ -643,7 +649,8 @@ class API:
                         & (ns.inventory[k("Color Name", sanmar)] == color_name)
                         & (ns.inventory[k("Size", sanmar)] == variant.attributes[size_option])
                         ]
-                    if not row.empty and row[k("Item Number", sanmar)].values[0] not in ns.shopify_ids:
+                    # if not row.empty and row[k("Item Number", sanmar)].values[0] not in ns.shopify_ids:
+                    if not row.empty:
                         fn = row[k("Front of Image Name", sanmar)].values[0]
                         image = images.get(fn, None)
                         if not image:
