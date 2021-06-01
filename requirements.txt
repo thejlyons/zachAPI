@@ -21,4 +21,4 @@ six==1.12.0
 soupsieve==2.0.1
 twill3==0.11.2
 Unidecode==1.0.23
-urllib3==1.24.2
+urllib3==1.26.5
