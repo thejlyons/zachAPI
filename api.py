@@ -246,6 +246,7 @@ class API:
                                                                              os.environ["SHOPIFY_PASSWORD"],
                                                                              os.environ["SHOPIFY_STORE"])
         shopify.ShopifyResource.set_site(shop_url)
+        shopify.ShopifyResource.headers.update({'X-Shopify-Access-Token': shopify.ShopifyResource.password})
 
         self.debug("Retrieving database entries.")
         # changes = self.find_changes()
@@ -263,29 +264,59 @@ class API:
 
         self.debug("Processing products.")
         total = self._inventory.shape[0]
+        client = shopify.GraphQL()
         progress = []
         for i, (index, item) in enumerate(self._inventory.iterrows()):
             if 'Drop Ship' in item[self.k("Mill Name")]:
                 continue
             if item[self.k("Style")] not in self._current_products:
-                all_products = shopify.Product.find(limit=250, vendor=item[self.k("Mill Name")])
                 products = []
-                for product in all_products:
-                    if item[self.k("Style")] in product.title:
-                        style = product.title.replace(',', '').split(' ')
-                        if item[self.k("Style")] in style:
-                            if len(product.options) > 0 and product.options[0].name == 'Color':
-                                for x in range(len(product.variants)):
-                                    product.variants[x].option2, product.variants[x].option1 = (
-                                        product.variants[x].option1, product.variants[x].option2
-                                    )
-                                product.options.reverse()
-                                product.save()
-                                # print("----{} needs checked.----".format(item[self.k("Style")]))
-                                self._styles_to_fix.append(item[self.k("Style")])
-                            if len(product.variants) == 1 and product.variants[0].title == 'Default Title':
-                                product.variants = []
-                            products.append(product)
+                z = 0
+                cursor = None
+
+                while True:
+                    after = f', after: "{cursor}"' if cursor else ''
+                    style = f', query: "{item[self.k("Style")]}"'
+                    query = f'''
+                            {{
+                              products(first: 250{after}{style}) {{
+                                edges {{
+                                  cursor
+                                  node {{
+                                    legacyResourceId
+                                  }}
+                                }}
+                              }}
+                            }}
+                            '''
+
+                    cursor = None
+                    data = self.execute_graphql(client, query)
+                    for pv in data['data']['products']['edges']:
+                        node = pv['node']
+                        cursor = pv['cursor']
+                        pid = node['legacyResourceId']
+                        product = shopify.Product.find(pid)
+                        if product and item[self.k("Style")] in product.title:
+                            style = product.title.replace(',', '').split(' ')
+                            if item[self.k("Style")] in style:
+                                if len(product.options) > 0 and product.options[0].name == 'Color':
+                                    for x in range(len(product.variants)):
+                                        product.variants[x].option2, product.variants[x].option1 = (
+                                            product.variants[x].option1, product.variants[x].option2
+                                        )
+                                    product.options.reverse()
+                                    product.save()
+                                    # print("----{} needs checked.----".format(item[self.k("Style")]))
+                                    self._styles_to_fix.append(item[self.k("Style")])
+                                if len(product.variants) == 1 and product.variants[0].title == 'Default Title':
+                                    product.variants = []
+                                products.append(product)
+
+                    z += 1
+
+                    if cursor is None:
+                        break
                 self._current_products[item[self.k("Style")]] = products
             of_color = self._inventory.loc[(self._inventory[self.k("Style")] == item[self.k("Style")])
                                            & (self._inventory[self.k("Color Name")] == item[self.k("Color Name")])
@@ -354,9 +385,13 @@ class API:
                     skip = True
                     if variant.id:
                         if self._sanmar:
+                            # price = self.get_price(item)
                             price = self.get_price(item)
-                            if price != 0 and price != "":
+                            if price != variant.price:
                                 variant.price = price
+                                variant.save()
+                            # if price != 0 and price != "":
+                            #     variant.price = price
 
                         self._shopify_ids[str(item[self.k("Item Number")])] = {
                             "variant_id": variant.id,
@@ -372,7 +407,7 @@ class API:
                 product = p
                 break
 
-        skip = True
+        # skip = True
         if not skip:
             if not product:
                 product = self.new_product(item[self.k("Mill Name")], item[self.k("Style")],
@@ -731,7 +766,11 @@ class API:
     def get_price(self, item):
         """Get item price."""
         if self._sanmar:
-            return float(item['PIECE_PRICE'])
+            if not pd.isna(item['MSRP']):
+                return float(item['MSRP'])
+            else:
+                self.debug(f'Could not get price for: {item[self.k("Style")]}')
+                return 0
         else:
             if self._prices is None:
                 self._prices = pd.read_csv(os.path.join('files', self._price_file), delimiter='^', engine='python',

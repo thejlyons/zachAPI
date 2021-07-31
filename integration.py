@@ -2,10 +2,21 @@
 import os
 from api import API
 from dotenv import load_dotenv
-from datetime import datetime
+from datetime import datetime, timedelta
 import click
 
 load_dotenv()
+last_run = None
+
+
+def check_should_run():
+    """Check if it is the next day and SanMar should run again."""
+    global last_run
+
+    now = datetime.utcnow() - timedelta(hours=7)
+    if last_run is None or last_run.day != now.day:
+        last_run = now
+        return True
 
 
 @click.command()
@@ -39,8 +50,12 @@ def main(continuous, limit, download, verbose, existing, products, inventory, sa
     if inventory:
         if continuous:
             while True:
-                print(f'<{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}>: Looping inventory update.')
+                if check_should_run():
+                    print(f'<{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}>: Sanmar inventory update.')
+                    api.update_inventory()
+                print(f'<{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}>: AlphaBroder inventory update.')
                 api.update_inventory(True)
+
         else:
             api.update_inventory()
 
