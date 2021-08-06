@@ -117,10 +117,11 @@ class API:
 
         # Parse Inventory File
         self.debug("Parsing Inventory Files")
-        df_alpha = pd.read_csv(os.path.join('files', self._inventory_file), delimiter=',', engine='c')
+        df_alpha = pd.read_csv(os.path.join('files', self._inventory_file), delimiter=',', engine='c', dtype='string')
         df_sanmar = None
         if not alpha_only:
-            df_sanmar = pd.read_csv(os.path.join('files', self._product_file_sanmar), delimiter=',', engine='c')
+            df_sanmar = pd.read_csv(os.path.join('files', self._product_file_sanmar), delimiter=',', engine='c',
+                                    dtype='string')
 
         z = 0
         cursor = None
@@ -729,7 +730,7 @@ class API:
         """Load in product files"""
         pf = self._product_file_sanmar if self._sanmar else self._product_file
         delimiter = ',' if self._sanmar else '^'
-        self._inventory = pd.read_csv(os.path.join('files', pf), delimiter=delimiter, engine='c')
+        self._inventory = pd.read_csv(os.path.join('files', pf), delimiter=delimiter, engine='c', dtype='string')
         self._inventory = self._inventory.loc[self._inventory[self.k('Category')].isin(self._categories)
                                               & ~self._inventory[self.k('Mill Name')].str.contains('Drop Ship',
                                                                                                    flags=re.IGNORECASE,
@@ -771,7 +772,8 @@ class API:
                 return 0
         else:
             if self._prices is None:
-                self._prices = pd.read_csv(os.path.join('files', self._price_file), delimiter='^', engine='c')
+                self._prices = pd.read_csv(os.path.join('files', self._price_file), delimiter='^', engine='c',
+                                           dtype='string')
 
             price = self._prices.loc[self._prices["Item Number "] == item["Item Number"]]
             if not price.empty:
