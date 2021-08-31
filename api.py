@@ -79,7 +79,7 @@ class API:
     _image_url = "https://www.alphabroder.com/media/hires/{}".format
     _product_file_sanmar = 'SanMar_EPDD.csv'
     _product_file = 'AllDBInfoALP_Prod.txt'
-    _price_file = 'AllDBInfoALP_PRC_R064.txt'
+    _price_file = 'AllDBInfoALP_PRC_RZ07.txt'
     _inventory_file = 'inventory-v8-alp.txt'
     _progress = []
     _save = False
@@ -117,91 +117,162 @@ class API:
 
         # Parse Inventory File
         self.debug("Parsing Inventory Files")
-        df_alpha = pd.read_csv(os.path.join('files', self._inventory_file), delimiter=',', engine='c', dtype='string')
+        df_alpha = pd.read_csv(os.path.join('files', self._inventory_file), delimiter=',', engine='python', dtype='string')
         df_sanmar = None
         if not alpha_only:
-            df_sanmar = pd.read_csv(os.path.join('files', self._product_file_sanmar), delimiter=',', engine='c',
+            df_sanmar = pd.read_csv(os.path.join('files', self._product_file_sanmar), delimiter=',', engine='python',
                                     dtype='string')
 
-        z = 0
-        cursor = None
+        # z = 0
+        # cursor = None
         client = shopify.GraphQL()
         inventory_item_adjustments = []
 
-        while True:
-            self.debug("Getting page {}".format(z))
+        product_progress = []
+        for i, pid in enumerate(self._product_ids):
+            p = int((i + 1) * 100 / len(self._product_ids))
+            if p not in product_progress:
+                product_progress.append(p)
+                if self._debug:
+                    self.debug(f'{i}/{len(self._product_ids)} - {p}%')
+                else:
+                    self.debug(f'{p}%', True)
 
-            after = f', after: "{cursor}"' if cursor else ''
-            style = ''
+            # TODO: Re-implement this feature
             if os.environ.get('ONLY_THESE') is not None:
-                style = " OR ".join(os.environ['ONLY_THESE'].split(","))
-                style = f', query: "{style}"'
+                pass
+
+            joiner = '", "gid://shopify/ProductVariant/'
             query = f'''
-            {{
-              productVariants(first: 250{after}{style}) {{
-                edges {{
-                  cursor
-                  node {{
-                    legacyResourceId
-                    product {{
-                      legacyResourceId
+                {{
+                    nodes(ids: ["gid://shopify/ProductVariant/{joiner.join(self._product_ids[pid].keys())}"]) {{
+                        ... on ProductVariant {{
+                            id
+                            inventoryQuantity
+                            inventoryItem {{
+                                id
+                            }}
+                        }}
                     }}
-                    inventoryQuantity
-                    inventoryItem {{
-                      id
-                    }}
-                  }}
                 }}
-              }}
-            }}
             '''
 
             cursor = None
             data = self.execute_graphql(client, query)
-            for pv in data['data']['productVariants']['edges']:
-                node = pv['node']
-                cursor = pv['cursor']
-                pid = node['product']['legacyResourceId']
-                vid = node['legacyResourceId']
-                quantity = node['inventoryQuantity']
-                ii_id = node['inventoryItem']['id']
+            ii_ids = {}
+            for item in data.get('data', {}).get('nodes', []):
+                vid = item['id'].replace('gid://shopify/ProductVariant/', '')
+                ii_data = {
+                    'quantity': item.get('inventoryQuantity', 0),
+                    'ii_id': item.get('inventoryItem', {}).get('id')
+                }
+                if ii_data['ii_id'] is not None:
+                    ii_ids[vid] = ii_data
 
-                if pid in self._product_ids and vid in self._product_ids[pid]:
-                    item = self._product_ids[pid][vid]
-                    alpha_item = item.get('alpha', None) if isinstance(item, dict) else item
-                    sanmar_item = item.get('sanmar', None) if isinstance(item, dict) else item
+            for vid, item in self._product_ids[pid].items():
+                alpha_item = item.get('alpha', None) if isinstance(item, dict) else item
+                sanmar_item = item.get('sanmar', None) if isinstance(item, dict) else item
 
-                    found = False
-                    total = 0
-                    if alpha_item:
-                        alpha_row = df_alpha.loc[df_alpha['Item Number'].isin([alpha_item])]
-                        if not alpha_row.empty:
-                            found = True
-                            total += int(alpha_row[k("Total Inventory", False)].values[0])
-                            total -= int(alpha_row["DROP SHIP"].values[0])
+                found = False
+                total = 0
+                if alpha_item:
+                    alpha_row = df_alpha.loc[df_alpha['Item Number'].isin([alpha_item])]
+                    if not alpha_row.empty:
+                        found = True
+                        total += int(alpha_row[k("Total Inventory", False)].values[0])
+                        total -= int(alpha_row["DROP SHIP"].values[0])
 
-                    if sanmar_item and not alpha_only:
-                        sanmar_row = df_sanmar.loc[df_sanmar[k('Item Number', True)].isin([sanmar_item])]
-                        if not sanmar_row.empty:
-                            found = True
-                            total += int(sanmar_row[k("Total Inventory", True)].values[0])
+                if sanmar_item and not alpha_only:
+                    sanmar_row = df_sanmar.loc[df_sanmar[k('Item Number', True)].isin([sanmar_item])]
+                    if not sanmar_row.empty:
+                        found = True
+                        total += int(sanmar_row[k("Total Inventory", True)].values[0])
 
-                    # available_delta = -quantity  # Set to 0 if inventory is no longer tracked for this item
-                    if found:
-                        available_delta = total - quantity  # Set to inventory
+                # available_delta = -quantity  # Set to 0 if inventory is no longer tracked for this item
+                if found and vid in ii_ids:
+                    available_delta = total - ii_ids[vid]['quantity']  # Set to inventory
 
-                        iia = f'{{inventoryItemId: "{ii_id}", availableDelta: {available_delta}}}'
+                    if available_delta != 0:
+                        iia = f'{{inventoryItemId: "{ii_ids[vid]["ii_id"]}", availableDelta: {available_delta}}}'
                         inventory_item_adjustments.append(iia)
                         if len(inventory_item_adjustments) == 100:
                             self.update_inventory_items(client, inventory_item_adjustments)
                             inventory_item_adjustments = []
-                # else:
-                #     self.debug(f"https://bulkthreads.myshopify.com/admin/products/{pid}/variants/{vid}")
 
-            z += 1
-
-            if cursor is None:
-                break
+        # while True:
+        #     self.debug("Getting page {}".format(z))
+        #
+        #     after = f', after: "{cursor}"' if cursor else ''
+        #     style = ''
+        #     if os.environ.get('ONLY_THESE') is not None:
+        #         style = " OR ".join(os.environ['ONLY_THESE'].split(","))
+        #         style = f', query: "{style}"'
+        #     query = f'''
+        #     {{
+        #       productVariants(first: 250{after}{style}) {{
+        #         edges {{
+        #           cursor
+        #           node {{
+        #             legacyResourceId
+        #             product {{
+        #               legacyResourceId
+        #             }}
+        #             inventoryQuantity
+        #             inventoryItem {{
+        #               id
+        #             }}
+        #           }}
+        #         }}
+        #       }}
+        #     }}
+        #     '''
+        #
+        #     cursor = None
+        #     data = self.execute_graphql(client, query)
+        #     for pv in data['data']['productVariants']['edges']:
+        #         node = pv['node']
+        #         cursor = pv['cursor']
+        #         pid = node['product']['legacyResourceId']
+        #         vid = node['legacyResourceId']
+        #         quantity = node['inventoryQuantity']
+        #         ii_id = node['inventoryItem']['id']
+        #
+        #         if pid in self._product_ids and vid in self._product_ids[pid]:
+        #             item = self._product_ids[pid][vid]
+        #             alpha_item = item.get('alpha', None) if isinstance(item, dict) else item
+        #             sanmar_item = item.get('sanmar', None) if isinstance(item, dict) else item
+        #
+        #             found = False
+        #             total = 0
+        #             if alpha_item:
+        #                 alpha_row = df_alpha.loc[df_alpha['Item Number'].isin([alpha_item])]
+        #                 if not alpha_row.empty:
+        #                     found = True
+        #                     total += int(alpha_row[k("Total Inventory", False)].values[0])
+        #                     total -= int(alpha_row["DROP SHIP"].values[0])
+        #
+        #             if sanmar_item and not alpha_only:
+        #                 sanmar_row = df_sanmar.loc[df_sanmar[k('Item Number', True)].isin([sanmar_item])]
+        #                 if not sanmar_row.empty:
+        #                     found = True
+        #                     total += int(sanmar_row[k("Total Inventory", True)].values[0])
+        #
+        #             # available_delta = -quantity  # Set to 0 if inventory is no longer tracked for this item
+        #             if found:
+        #                 available_delta = total - quantity  # Set to inventory
+        #
+        #                 iia = f'{{inventoryItemId: "{ii_id}", availableDelta: {available_delta}}}'
+        #                 inventory_item_adjustments.append(iia)
+        #                 if len(inventory_item_adjustments) == 100:
+        #                     self.update_inventory_items(client, inventory_item_adjustments)
+        #                     inventory_item_adjustments = []
+        #         # else:
+        #         #     self.debug(f"https://bulkthreads.myshopify.com/admin/products/{pid}/variants/{vid}")
+        #
+        #     z += 1
+        #
+        #     if cursor is None:
+        #         break
 
         self.update_inventory_items(client, inventory_item_adjustments)
         # TODO: set to 0 products that weren't found
@@ -297,7 +368,7 @@ class API:
                         pid = node['legacyResourceId']
                         product = shopify.Product.find(pid)
                         if product and item[self.k("Style")] in product.title:
-                            style = product.title.replace(',', '').split(' ')
+                            style = product.title.replace(',', '').replace(':', '').split(' ')
                             if item[self.k("Style")] in style:
                                 if len(product.options) > 0 and product.options[0].name == 'Color':
                                     for x in range(len(product.variants)):
@@ -311,7 +382,6 @@ class API:
                                 if len(product.variants) == 1 and product.variants[0].title == 'Default Title':
                                     product.variants = []
                                 products.append(product)
-
                     z += 1
 
                     if cursor is None:
@@ -406,7 +476,7 @@ class API:
                 product = p
                 break
 
-        # skip = True
+        skip = True
         if not skip:
             if not product:
                 product = self.new_product(item[self.k("Mill Name")], item[self.k("Style")],
@@ -543,8 +613,8 @@ class API:
             self._shopify_ids[key] = item
             self._product_ids.setdefault(str(item["product_id"]), {}).setdefault(str(item["variant_id"]), {})[sa] = key
             vids.append(str(item["variant_id"]))
-        print(vids)
-        print(",".join(vids))
+        print(f"Handled: {len(vids)}")
+        # print(",".join(vids))
 
     def update_inventory_items(self, client, inventory_item_adjustments):
         """Bulk updates."""
@@ -590,6 +660,7 @@ class API:
             cost = result['extensions']['cost']
             sleep_for = (cost['requestedQueryCost'] + 10 - cost['throttleStatus']['currentlyAvailable'])
             sleep_for /= cost['throttleStatus']['restoreRate']
+            self.debug(f'Retrying GraphQL query in: {sleep_for}s')
             sleep(sleep_for)
 
             return self.execute_graphql(client, query)
@@ -730,11 +801,13 @@ class API:
         """Load in product files"""
         pf = self._product_file_sanmar if self._sanmar else self._product_file
         delimiter = ',' if self._sanmar else '^'
-        self._inventory = pd.read_csv(os.path.join('files', pf), delimiter=delimiter, engine='c', dtype='string')
-        self._inventory = self._inventory.loc[self._inventory[self.k('Category')].isin(self._categories)
-                                              & ~self._inventory[self.k('Mill Name')].str.contains('Drop Ship',
-                                                                                                   flags=re.IGNORECASE,
-                                                                                                   regex=True)]
+        self._inventory = pd.read_csv(os.path.join('files', pf), delimiter=delimiter, engine='python', dtype='string')
+        if self._sanmar:
+            self._inventory = self._inventory.loc[self._inventory[self.k('Category')].isin(self._categories)]
+        else:
+            self._inventory = self._inventory.loc[self._inventory[self.k('Category')].isin(self._categories)]
+            self._inventory = self._inventory.loc[~self._inventory[self.k('Mill Name')].str.contains(
+                'Drop Ship', flags=re.IGNORECASE, regex=True)]
 
         if self._skip_existing:
             self._inventory = self._inventory.loc[~self._inventory[self.k('Item Number')].isin(inventory_store.keys())]
@@ -772,7 +845,7 @@ class API:
                 return 0
         else:
             if self._prices is None:
-                self._prices = pd.read_csv(os.path.join('files', self._price_file), delimiter='^', engine='c',
+                self._prices = pd.read_csv(os.path.join('files', self._price_file), delimiter='^', engine='python',
                                            dtype='string')
 
             price = self._prices.loc[self._prices["Item Number "] == item["Item Number"]]

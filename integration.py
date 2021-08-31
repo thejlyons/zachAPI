@@ -53,8 +53,8 @@ def main(continuous, limit, download, verbose, existing, products, inventory, sa
                 # if check_should_run():
                 #     print(f'<{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}>: Sanmar inventory update.')
                 #     api.update_inventory()
-                print(f'<{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}>: AlphaBroder inventory update.')
-                api.update_inventory(True)
+                print(f'<{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}>: All inventory update.')
+                api.update_inventory()
 
         else:
             api.update_inventory()
