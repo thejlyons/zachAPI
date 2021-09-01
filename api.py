@@ -188,9 +188,10 @@ class API:
                         found = True
                         total += int(sanmar_row[k("Total Inventory", True)].values[0])
 
-                # available_delta = -quantity  # Set to 0 if inventory is no longer tracked for this item
-                if found and vid in ii_ids:
-                    available_delta = total - ii_ids[vid]['quantity']  # Set to inventory
+                if vid in ii_ids:
+                    available_delta = -ii_ids[vid]['quantity']  # Set to 0 if inventory is no longer tracked
+                    if found:
+                        available_delta = total - ii_ids[vid]['quantity']  # Set to inventory
 
                     if available_delta != 0:
                         iia = f'{{inventoryItemId: "{ii_ids[vid]["ii_id"]}", availableDelta: {available_delta}}}'
