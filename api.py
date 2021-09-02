@@ -117,11 +117,11 @@ class API:
 
         # Parse Inventory File
         self.debug("Parsing Inventory Files")
-        df_alpha = pd.read_csv(os.path.join('files', self._inventory_file), delimiter=',', engine='python', dtype='string')
+        df_alpha = pd.read_csv(os.path.join('files', self._inventory_file), delimiter=',', engine='python', dtype='str')
         df_sanmar = None
         if not alpha_only:
             df_sanmar = pd.read_csv(os.path.join('files', self._product_file_sanmar), delimiter=',', engine='python',
-                                    dtype='string')
+                                    dtype='str')
 
         # z = 0
         # cursor = None
@@ -802,7 +802,7 @@ class API:
         """Load in product files"""
         pf = self._product_file_sanmar if self._sanmar else self._product_file
         delimiter = ',' if self._sanmar else '^'
-        self._inventory = pd.read_csv(os.path.join('files', pf), delimiter=delimiter, engine='python', dtype='string')
+        self._inventory = pd.read_csv(os.path.join('files', pf), delimiter=delimiter, engine='python', dtype='str')
         if self._sanmar:
             self._inventory = self._inventory.loc[self._inventory[self.k('Category')].isin(self._categories)]
         else:
@@ -847,7 +847,7 @@ class API:
         else:
             if self._prices is None:
                 self._prices = pd.read_csv(os.path.join('files', self._price_file), delimiter='^', engine='python',
-                                           dtype='string')
+                                           dtype='str')
 
             price = self._prices.loc[self._prices["Item Number "] == item["Item Number"]]
             if not price.empty:
