@@ -927,7 +927,6 @@ class API:
                 print(e)
 
         if self._download:
-            return
             for f in [self._inventory_file, self._product_file, self._price_file, self._product_file_sanmar]:
                 if os.path.isfile(os.path.join('files', f)):
                     os.unlink(os.path.join('files', f))
