@@ -5,7 +5,7 @@ click==7.1.2
 cssselect==1.0.3
 dnspython==1.16.0
 idna==2.8
-lxml==4.3.2
+lxml==4.6.5
 numpy==1.19.1
 pandas==1.1.1
 pyactiveresource==2.2.1
