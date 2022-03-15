@@ -159,6 +159,7 @@ class API:
 
             cursor = None
             data = self.execute_graphql(client, query)
+            print(data)
             ii_ids = {}
             for item in data.get('data', {}).get('nodes', []):
                 print(item)
