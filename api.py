@@ -79,7 +79,7 @@ class API:
     _image_url = "https://www.alphabroder.com/media/hires/{}".format
     _product_file_sanmar = 'SanMar_EPDD.csv'
     _product_file = 'AllDBInfoALP_Prod.txt'
-    _price_file = 'AllDBInfoALP_PRC_RZ07.txt'
+    _price_file = 'AllDBInfoALP_PRC_RZ19.txt'
     _inventory_file = 'inventory-v8-alp.txt'
     _progress = []
     _save = False
@@ -161,6 +161,7 @@ class API:
             data = self.execute_graphql(client, query)
             ii_ids = {}
             for item in data.get('data', {}).get('nodes', []):
+                print(item)
                 vid = item['id'].replace('gid://shopify/ProductVariant/', '')
                 ii_data = {
                     'quantity': item.get('inventoryQuantity', 0),
@@ -457,9 +458,15 @@ class API:
                         if self._sanmar:
                             # price = self.get_price(item)
                             price = self.get_price(item)
-                            if price != variant.price:
-                                variant.price = price
-                                variant.save()
+
+                            # Remove
+                            variant.price = price
+                            variant.save()
+                            #
+
+                            # if price != variant.price:
+                            #     variant.price = price
+                            #     variant.save()
                             # if price != 0 and price != "":
                             #     variant.price = price
 
@@ -839,8 +846,8 @@ class API:
     def get_price(self, item):
         """Get item price."""
         if self._sanmar:
-            if not pd.isna(item['MSRP']):
-                return float(item['MSRP'])
+            if not pd.isna(item['MAP_PRICING']):
+                return float(item['MAP_PRICING'])
             else:
                 self.debug(f'Could not get price for: {item[self.k("Style")]}')
                 return 0
