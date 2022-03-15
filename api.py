@@ -159,7 +159,6 @@ class API:
 
             cursor = None
             data = self.execute_graphql(client, query)
-            print(data)
             ii_ids = {}
             for item in data.get('data', {}).get('nodes', []):
                 if item:
@@ -172,7 +171,6 @@ class API:
                         ii_ids[vid] = ii_data
 
             for vid, item in self._product_ids[pid].items():
-                print(vid)
                 if vid in ii_ids:
                     alpha_item = item.get('alpha', None) if isinstance(item, dict) else item
                     sanmar_item = item.get('sanmar', None) if isinstance(item, dict) else item
