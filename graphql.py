@@ -49,22 +49,22 @@ for pv in data['data']['productVariants']['edges']:
     print(quantity)
     print(pid)
 
-nl = '\n'
-query = f'''
-  mutation {{
-      inventoryBulkAdjustQuantityAtLocation(
-        locationId: "gid://shopify/Location/{os.environ['SHOPIFY_LOCATION']}",
-        inventoryItemAdjustments: [
-          {f',{nl}'.join(inventory_item_adjustments)}
-          ]) {{
-
-        inventoryLevels {{
-          available
-        }}
-      }}
-    }}
-'''
-
-print(query)
-# result = client.execute(query)
-print(result)
+# nl = '\n'
+# query = f'''
+#   mutation {{
+#       inventoryBulkAdjustQuantityAtLocation(
+#         locationId: "gid://shopify/Location/{os.environ['SHOPIFY_LOCATION']}",
+#         inventoryItemAdjustments: [
+#           {f',{nl}'.join(inventory_item_adjustments)}
+#           ]) {{
+#
+#         inventoryLevels {{
+#           available
+#         }}
+#       }}
+#     }}
+# '''
+#
+# print(query)
+# # result = client.execute(query)
+# print(result)

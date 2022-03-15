@@ -162,35 +162,36 @@ class API:
             print(data)
             ii_ids = {}
             for item in data.get('data', {}).get('nodes', []):
-                print(item)
-                vid = item['id'].replace('gid://shopify/ProductVariant/', '')
-                ii_data = {
-                    'quantity': item.get('inventoryQuantity', 0),
-                    'ii_id': item.get('inventoryItem', {}).get('id')
-                }
-                if ii_data['ii_id'] is not None:
-                    ii_ids[vid] = ii_data
+                if item:
+                    vid = item['id'].replace('gid://shopify/ProductVariant/', '')
+                    ii_data = {
+                        'quantity': item.get('inventoryQuantity', 0),
+                        'ii_id': item.get('inventoryItem', {}).get('id')
+                    }
+                    if ii_data['ii_id'] is not None:
+                        ii_ids[vid] = ii_data
 
             for vid, item in self._product_ids[pid].items():
-                alpha_item = item.get('alpha', None) if isinstance(item, dict) else item
-                sanmar_item = item.get('sanmar', None) if isinstance(item, dict) else item
-
-                found = False
-                total = 0
-                if alpha_item:
-                    alpha_row = df_alpha.loc[df_alpha['Item Number'].isin([alpha_item])]
-                    if not alpha_row.empty:
-                        found = True
-                        total += int(alpha_row[k("Total Inventory", False)].values[0])
-                        total -= int(alpha_row["DROP SHIP"].values[0])
-
-                if sanmar_item and not alpha_only:
-                    sanmar_row = df_sanmar.loc[df_sanmar[k('Item Number', True)].isin([sanmar_item])]
-                    if not sanmar_row.empty:
-                        found = True
-                        total += int(sanmar_row[k("Total Inventory", True)].values[0])
-
+                print(vid)
                 if vid in ii_ids:
+                    alpha_item = item.get('alpha', None) if isinstance(item, dict) else item
+                    sanmar_item = item.get('sanmar', None) if isinstance(item, dict) else item
+
+                    found = False
+                    total = 0
+                    if alpha_item:
+                        alpha_row = df_alpha.loc[df_alpha['Item Number'].isin([alpha_item])]
+                        if not alpha_row.empty:
+                            found = True
+                            total += int(alpha_row[k("Total Inventory", False)].values[0])
+                            total -= int(alpha_row["DROP SHIP"].values[0])
+
+                    if sanmar_item and not alpha_only:
+                        sanmar_row = df_sanmar.loc[df_sanmar[k('Item Number', True)].isin([sanmar_item])]
+                        if not sanmar_row.empty:
+                            found = True
+                            total += int(sanmar_row[k("Total Inventory", True)].values[0])
+
                     available_delta = -ii_ids[vid]['quantity']  # Set to 0 if inventory is no longer tracked
                     if found:
                         available_delta = total - ii_ids[vid]['quantity']  # Set to inventory
